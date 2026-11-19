@@ -1,0 +1,6 @@
+{
+  "name": "HostelLoop",
+  "description": "Campus-specific student marketplace for DBS Global University (DGU), Selaqui, Dehradun — buy, sell, exchange, rent, or donate reusable hostel and study essentials.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
