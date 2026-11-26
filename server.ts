@@ -172,14 +172,10 @@ interface VerifiedGoogleIdentity {
 }
 
 async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedGoogleIdentity> {
-  const projectId = (
-    process.env.FIREBASE_PROJECT_ID ||
-    process.env.VITE_FIREBASE_PROJECT_ID ||
-    ''
-  ).trim();
+  const projectId = (process.env.VITE_FIREBASE_PROJECT_ID || '').trim();
   if (!projectId) {
     throw new Error(
-      'Server FIREBASE_PROJECT_ID (or VITE_FIREBASE_PROJECT_ID) is not configured for Firebase token verification.'
+      'Server VITE_FIREBASE_PROJECT_ID is not configured for Firebase token verification.'
     );
   }
   const parts = idToken.split('.');
@@ -243,20 +239,8 @@ async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedGoogleIde
   };
 }
 
-const oauthStates = new Map<string, { createdAt: number; redirectUri: string }>();
-
-function getBaseUrl(req: Request): string {
-  if (process.env.APP_URL) {
-    return process.env.APP_URL.replace(/\/+$/, '');
-  }
-  const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0] || req.protocol || 'http';
-  const host = (req.headers['x-forwarded-host'] as string)?.split(',')[0] || req.get('host');
-  return `${proto}://${host}`;
-}
-
 function upsertGoogleUser(
-  identity: VerifiedGoogleIdentity,
-  provider: 'google_firebase' | 'google_oauth'
+  identity: VerifiedGoogleIdentity
 ): { user: StoredUser; isNewUser: boolean } {
   const normalizedEmail = identity.email.trim().toLowerCase();
   let existing = db.users.find(
@@ -273,7 +257,7 @@ function upsertGoogleUser(
       throw new Error('This account has been suspended by campus moderation.');
     }
     existing.googleUid = identity.googleUid;
-    existing.authProvider = provider;
+    existing.authProvider = 'google_firebase';
     if (identity.avatarUrl) {
       existing.avatarUrl = identity.avatarUrl;
     }
@@ -289,7 +273,7 @@ function upsertGoogleUser(
   const newUser: StoredUser = {
     id: `user-${crypto.randomUUID().slice(0, 8)}`,
     googleUid: identity.googleUid,
-    authProvider: provider,
+    authProvider: 'google_firebase',
     name: identity.name,
     email: normalizedEmail,
     campusAffiliation: CAMPUS_AFFILIATION_OPTIONS[0],
@@ -357,16 +341,9 @@ async function startServer() {
         process.env.VITE_FIREBASE_PROJECT_ID &&
         process.env.VITE_FIREBASE_APP_ID
     );
-    const googleOAuthConfigured = Boolean(
-      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
-    );
     res.json({
       allowedDomains: ALLOWED_DGU_DOMAINS,
       firebaseConfigured,
-      firebaseProjectIdSet: Boolean(
-        process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID
-      ),
-      googleOAuthConfigured,
       emailDeliveryConfigured: Boolean(process.env.SMTP_HOST),
       demoModeAvailable: true,
     });
@@ -388,7 +365,7 @@ async function startServer() {
     }
     try {
       const identity = await verifyFirebaseIdToken(idToken);
-      const { user, isNewUser } = upsertGoogleUser(identity, 'google_firebase');
+      const { user, isNewUser } = upsertGoogleUser(identity);
       const token = crypto.randomBytes(24).toString('hex');
       db.sessions[token] = user.id;
       saveDb(db);
@@ -401,151 +378,6 @@ async function startServer() {
       const msg = err instanceof Error ? err.message : 'Google authentication failed.';
       const status = msg.includes('not configured') ? 503 : 401;
       return res.status(status).json({ error: msg });
-    }
-  });
-
-  // Auth: Direct Google OAuth 2.0 popup URL (when GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET are set)
-  app.get('/api/auth/google/url', (req, res) => {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-      return res.status(503).json({
-        error:
-          'Google OAuth credentials are not configured. Set VITE_FIREBASE_* or GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.',
-      });
-    }
-    const baseUrl = getBaseUrl(req);
-    const redirectUri = `${baseUrl}/auth/callback`;
-    const state = crypto.randomBytes(20).toString('hex');
-    oauthStates.set(state, { createdAt: Date.now(), redirectUri });
-    // Prune stale states older than 15 minutes
-    for (const [key, val] of oauthStates.entries()) {
-      if (Date.now() - val.createdAt > 15 * 60 * 1000) {
-        oauthStates.delete(key);
-      }
-    }
-
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      response_type: 'code',
-      scope: 'openid email profile',
-      prompt: 'select_account',
-      access_type: 'online',
-      state,
-    });
-    return res.json({
-      url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
-    });
-  });
-
-  // Auth: Direct Google OAuth 2.0 popup callback
-  app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
-    const sendPopupResult = (payload: Record<string, unknown>) => {
-      const safeJson = JSON.stringify(payload).replace(/</g, '\\u003c');
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(`<!doctype html>
-<html>
-  <head><title>HostelLoop Google Sign-In</title></head>
-  <body style="font-family:sans-serif;padding:24px;color:#202824;background:#F8FAF8;">
-    <p>Completing HostelLoop Google Sign-In...</p>
-    <script>
-      (function() {
-        var data = ${safeJson};
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage(data, window.location.origin);
-        }
-        window.close();
-      })();
-    </script>
-  </body>
-</html>`);
-    };
-
-    const { code, state, error } = req.query as Record<string, string | undefined>;
-    if (error) {
-      return sendPopupResult({
-        type: 'GOOGLE_OAUTH_ERROR',
-        error: `Google sign-in was cancelled or denied (${error}).`,
-      });
-    }
-    if (!code || !state || !oauthStates.has(state)) {
-      return sendPopupResult({
-        type: 'GOOGLE_OAUTH_ERROR',
-        error: 'Invalid or expired OAuth state. Please try signing in again.',
-      });
-    }
-
-    const storedState = oauthStates.get(state)!;
-    oauthStates.delete(state);
-
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-      return sendPopupResult({
-        type: 'GOOGLE_OAUTH_ERROR',
-        error: 'Google OAuth credentials are missing on the server.',
-      });
-    }
-
-    try {
-      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code,
-          client_id: clientId,
-          client_secret: clientSecret,
-          redirect_uri: storedState.redirectUri,
-          grant_type: 'authorization_code',
-        }),
-      });
-      const tokenData = (await tokenResp.json()) as {
-        access_token?: string;
-        error?: string;
-        error_description?: string;
-      };
-      if (!tokenResp.ok || !tokenData.access_token) {
-        throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed.');
-      }
-
-      const userinfoResp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` },
-      });
-      const profile = (await userinfoResp.json()) as {
-        sub?: string;
-        email?: string;
-        name?: string;
-        picture?: string;
-      };
-      if (!userinfoResp.ok || !profile.sub || !profile.email) {
-        throw new Error('Could not retrieve Google user profile.');
-      }
-
-      const { user, isNewUser } = upsertGoogleUser(
-        {
-          googleUid: profile.sub,
-          email: profile.email,
-          name: profile.name || profile.email.split('@')[0],
-          avatarUrl: profile.picture,
-        },
-        'google_oauth'
-      );
-      const sessionToken = crypto.randomBytes(24).toString('hex');
-      db.sessions[sessionToken] = user.id;
-      saveDb(db);
-
-      return sendPopupResult({
-        type: 'GOOGLE_OAUTH_SUCCESS',
-        token: sessionToken,
-        user: sanitizeUser(user),
-        isNewUser,
-      });
-    } catch (err) {
-      return sendPopupResult({
-        type: 'GOOGLE_OAUTH_ERROR',
-        error: err instanceof Error ? err.message : 'Google OAuth sign-in failed.',
-      });
     }
   });
 

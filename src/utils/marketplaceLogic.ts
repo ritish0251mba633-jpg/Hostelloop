@@ -143,7 +143,7 @@ export function getUserIdentityBadge(user: Pick<UserProfile, 'verificationStatus
       tone: 'verified',
     };
   }
-  if (user.authProvider === 'google_firebase' || user.authProvider === 'google_oauth') {
+  if (user.authProvider === 'google_firebase') {
     return {
       label: 'Google Signed In · Campus Unverified',
       isVerifiedDguStudent: false,
@@ -174,10 +174,94 @@ export function mapGoogleAuthError(codeOrMessage: string): string {
   if (lower.includes('network-request-failed')) {
     return 'Network error while connecting to Google Authentication. Check your connection and retry.';
   }
-  if (lower.includes('invalid-api-key') || lower.includes('configuration-not-found')) {
-    return 'Firebase Google Authentication is not configured or has an invalid API key.';
+  if (lower.includes('operation-not-allowed')) {
+    return 'Google sign-in provider is not enabled yet. Enable Google in Firebase Console -> Authentication -> Sign-in method.';
+  }
+  if (lower.includes('user-disabled')) {
+    return 'This Google account has been disabled in Firebase Authentication.';
+  }
+  if (lower.includes('too-many-requests')) {
+    return 'Too many sign-in attempts. Please wait a moment and try again.';
+  }
+  if (lower.includes('invalid-api-key') || lower.includes('configuration-not-found') || lower.includes('invalid-credential')) {
+    return 'Firebase Google Authentication is not configured or has invalid credentials. Check your VITE_FIREBASE_* variables.';
+  }
+  if (lower.includes('internal-error')) {
+    return 'Firebase Authentication encountered an internal error. Verify your Firebase Web configuration and authorized domains.';
   }
   return codeOrMessage || 'Google authentication failed. Please try again.';
+}
+
+export const FIREBASE_REQUIRED_ENV_KEYS = [
+  'VITE_FIREBASE_API_KEY',
+  'VITE_FIREBASE_AUTH_DOMAIN',
+  'VITE_FIREBASE_PROJECT_ID',
+  'VITE_FIREBASE_APP_ID',
+] as const;
+
+export const FIREBASE_OPTIONAL_ENV_KEYS = [
+  'VITE_FIREBASE_STORAGE_BUCKET',
+  'VITE_FIREBASE_MESSAGING_SENDER_ID',
+] as const;
+
+const ENV_KEY_TO_CONFIG_PROP: Record<string, string> = {
+  VITE_FIREBASE_API_KEY: 'apiKey',
+  VITE_FIREBASE_AUTH_DOMAIN: 'authDomain',
+  VITE_FIREBASE_PROJECT_ID: 'projectId',
+  VITE_FIREBASE_APP_ID: 'appId',
+  VITE_FIREBASE_STORAGE_BUCKET: 'storageBucket',
+  VITE_FIREBASE_MESSAGING_SENDER_ID: 'messagingSenderId',
+};
+
+export function normalizeFirebaseEnvValue(
+  envKey: string,
+  rawValue: string | undefined
+): string {
+  const trimmed = (rawValue || '').trim();
+  if (!trimmed) return '';
+
+  const propName = ENV_KEY_TO_CONFIG_PROP[envKey];
+  if (propName && (trimmed.includes('firebaseConfig') || trimmed.includes(`${propName}:`))) {
+    const match = trimmed.match(new RegExp(`${propName}\\s*:\\s*["'\`]([^"'\`]+)["'\`]`));
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return trimmed.replace(/^["']|["']$/g, '').trim();
+}
+
+export function normalizeFirebaseEnvValues(
+  env: Record<string, string | undefined>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const key of [...FIREBASE_REQUIRED_ENV_KEYS, ...FIREBASE_OPTIONAL_ENV_KEYS]) {
+    result[key] = normalizeFirebaseEnvValue(key, env[key]);
+  }
+  return result;
+}
+
+export interface FirebaseEnvStatus {
+  configured: boolean;
+  missingRequired: string[];
+  missingOptional: string[];
+}
+
+export function inspectFirebaseEnv(
+  env: Record<string, string | undefined>
+): FirebaseEnvStatus {
+  const normalized = normalizeFirebaseEnvValues(env);
+  const missingRequired = FIREBASE_REQUIRED_ENV_KEYS.filter(
+    (key) => !normalized[key]
+  );
+  const missingOptional = FIREBASE_OPTIONAL_ENV_KEYS.filter(
+    (key) => !normalized[key]
+  );
+  return {
+    configured: missingRequired.length === 0,
+    missingRequired: [...missingRequired],
+    missingOptional: [...missingOptional],
+  };
 }
 
 export interface ListingFilterParams {

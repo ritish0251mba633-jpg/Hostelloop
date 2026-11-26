@@ -6,7 +6,9 @@ import {
   filterAndSortListings,
   formatINR,
   getUserIdentityBadge,
+  inspectFirebaseEnv,
   mapGoogleAuthError,
+  normalizeFirebaseEnvValues,
   validateAnyEmail,
   validateDguEmail,
   validateListingInput,
@@ -136,6 +138,53 @@ test('mapGoogleAuthError maps Firebase error codes into clear messages', () => {
   assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-closed-by-user).'), /closed/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-blocked).'), /blocked/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/unauthorized-domain).'), /Authorized domains/i);
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/operation-not-allowed).'), /Sign-in method/i);
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/user-disabled).'), /disabled/i);
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/internal-error).'), /internal error/i);
+});
+
+test('inspectFirebaseEnv accurately detects missing and configured VITE_FIREBASE_* variables', () => {
+  const empty = inspectFirebaseEnv({});
+  assert.equal(empty.configured, false);
+  assert.deepEqual(empty.missingRequired, [
+    'VITE_FIREBASE_API_KEY',
+    'VITE_FIREBASE_AUTH_DOMAIN',
+    'VITE_FIREBASE_PROJECT_ID',
+    'VITE_FIREBASE_APP_ID',
+  ]);
+
+  const partial = inspectFirebaseEnv({
+    VITE_FIREBASE_API_KEY: 'AIzaTest',
+    VITE_FIREBASE_AUTH_DOMAIN: 'app.firebaseapp.com',
+  });
+  assert.equal(partial.configured, false);
+  assert.deepEqual(partial.missingRequired, [
+    'VITE_FIREBASE_PROJECT_ID',
+    'VITE_FIREBASE_APP_ID',
+  ]);
+
+  const ready = inspectFirebaseEnv({
+    VITE_FIREBASE_API_KEY: 'AIzaTest',
+    VITE_FIREBASE_AUTH_DOMAIN: 'app.firebaseapp.com',
+    VITE_FIREBASE_PROJECT_ID: 'my-proj',
+    VITE_FIREBASE_APP_ID: '1:123:web:abc',
+  });
+  assert.equal(ready.configured, true);
+  assert.equal(ready.missingRequired.length, 0);
+  assert.deepEqual(ready.missingOptional, [
+    'VITE_FIREBASE_STORAGE_BUCKET',
+    'VITE_FIREBASE_MESSAGING_SENDER_ID',
+  ]);
+
+  const normalized = normalizeFirebaseEnvValues({
+    VITE_FIREBASE_API_KEY:
+      '// snippet const firebaseConfig = { apiKey: "AIzaSyExampleKey123", authDomain: "proj.firebaseapp.com" };',
+    VITE_FIREBASE_AUTH_DOMAIN: 'proj.firebaseapp.com',
+    VITE_FIREBASE_PROJECT_ID: 'proj',
+    VITE_FIREBASE_APP_ID: '1:123:web:abc',
+  });
+  assert.equal(normalized.VITE_FIREBASE_API_KEY, 'AIzaSyExampleKey123');
+  assert.equal(normalized.VITE_FIREBASE_AUTH_DOMAIN, 'proj.firebaseapp.com');
 });
 
 test('filterAndSortListings excludes unapproved listings by default and sorts prices accurately', () => {

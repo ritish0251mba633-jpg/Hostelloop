@@ -17,15 +17,13 @@ import { AppRoute, UserProfile } from '../types/marketplace';
 import { HERO_CAMPUS_IMAGE } from '../data/seedData';
 import { api, setAuthToken } from '../utils/api';
 import {
+  getFirebaseEnvStatus,
   isFirebaseConfigured,
   signInWithGoogleFirebase,
-  signInWithGoogleOAuthPopup,
 } from '../utils/googleAuth';
 import { CAMPUS_AFFILIATION_OPTIONS, validateAnyEmail } from '../utils/marketplaceLogic';
 
 interface SignInPageProps {
-  firebaseConfigured: boolean;
-  googleOAuthConfigured: boolean;
   redirectNotice?: string | null;
   onBack: () => void;
   onAuthenticated: (user: UserProfile, isNewUser?: boolean) => Promise<void>;
@@ -56,8 +54,6 @@ function GoogleLogoSvg() {
 }
 
 export function SignInPage({
-  firebaseConfigured,
-  googleOAuthConfigured,
   redirectNotice,
   onBack,
   onAuthenticated,
@@ -86,30 +82,33 @@ export function SignInPage({
 
   const [legalModal, setLegalModal] = useState<'terms' | 'privacy' | null>(null);
 
-  const clientFirebaseReady = isFirebaseConfigured() || firebaseConfigured;
-  const anyGoogleProviderReady = clientFirebaseReady || googleOAuthConfigured;
+  const firebaseEnvStatus = getFirebaseEnvStatus();
+  const firebaseReady = isFirebaseConfigured();
 
   const handleContinueWithGoogle = async () => {
     setError(null);
     setInfoMsg(null);
     setConfigNoticeOpen(false);
 
-    if (!anyGoogleProviderReady) {
+    if (!firebaseReady) {
       setConfigNoticeOpen(true);
+      const missingList = firebaseEnvStatus.missingRequired.join(', ');
       setError(
-        'Google Sign-In is not configured in this environment yet. Add your Firebase Web credentials (VITE_FIREBASE_*) or Google OAuth credentials (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) to enable real Google account sign-in.'
+        `Firebase Google Sign-In is not configured yet. Missing required Vite environment variables: ${missingList}. Add them in Vercel Project Settings -> Environment Variables and redeploy.`
       );
       return;
     }
 
     setGoogleLoading(true);
     try {
-      const result = clientFirebaseReady
-        ? await signInWithGoogleFirebase()
-        : await signInWithGoogleOAuthPopup();
+      const result = await signInWithGoogleFirebase();
       await onAuthenticated(result.user, result.isNewUser);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Google authentication failed.');
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Firebase Google authentication failed. Please try again.'
+      );
     } finally {
       setGoogleLoading(false);
     }
@@ -346,34 +345,47 @@ export function SignInPage({
                 </p>
               </div>
 
-              {/* Honest configuration guidance when Google credentials are not yet configured */}
-              {(configNoticeOpen || !anyGoogleProviderReady) && (
+              {/* Honest configuration guidance when Firebase credentials are not yet configured */}
+              {(configNoticeOpen || !firebaseReady) && (
                 <div className="p-4 bg-[#F8FAF8] border border-[#D4E3DA] rounded-xl space-y-2 text-xs text-[#526058]">
                   <p className="font-semibold text-[#202824]">
-                    Google Sign-In Credentials Required in Environment
+                    Firebase Google Sign-In Configuration Required
                   </p>
                   <p className="leading-relaxed">
-                    HostelLoop uses real Google authentication (never simulated Google accounts). To
-                    enable the Google popup on this deployment, set{' '}
-                    <code className="text-[#145C45] font-mono-tabular">
-                      VITE_FIREBASE_API_KEY
-                    </code>
-                    ,{' '}
-                    <code className="text-[#145C45] font-mono-tabular">
-                      VITE_FIREBASE_AUTH_DOMAIN
-                    </code>
-                    ,{' '}
-                    <code className="text-[#145C45] font-mono-tabular">
-                      VITE_FIREBASE_PROJECT_ID
-                    </code>
-                    , and{' '}
-                    <code className="text-[#145C45] font-mono-tabular">
-                      VITE_FIREBASE_APP_ID
-                    </code>{' '}
-                    (or{' '}
-                    <code className="text-[#145C45] font-mono-tabular">GOOGLE_CLIENT_ID</code> &amp;{' '}
-                    <code className="text-[#145C45] font-mono-tabular">GOOGLE_CLIENT_SECRET</code>).
+                    HostelLoop uses real Firebase Google Authentication (never simulated login).
+                    Add these missing environment variables in Vercel (or{' '}
+                    <code className="text-[#145C45] font-mono-tabular">.env</code>) and redeploy:
                   </p>
+                  {firebaseEnvStatus.missingRequired.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="font-medium text-[#202824]">Missing required variables:</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {firebaseEnvStatus.missingRequired.map((key) => (
+                          <code
+                            key={key}
+                            className="font-mono-tabular text-[11px] text-[#145C45] bg-white border border-[#D4E3DA] px-1.5 py-0.5 rounded-md"
+                          >
+                            {key}
+                          </code>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {firebaseEnvStatus.missingOptional.length > 0 && (
+                    <div className="space-y-1 pt-0.5">
+                      <p className="text-[11px] text-[#73827A]">Optional Firebase Web config vars:</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {firebaseEnvStatus.missingOptional.map((key) => (
+                          <code
+                            key={key}
+                            className="font-mono-tabular text-[11px] text-[#526058] bg-white border border-[#E2EAE5] px-1.5 py-0.5 rounded-md"
+                          >
+                            {key}
+                          </code>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

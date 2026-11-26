@@ -14,59 +14,86 @@ import { UserProfile, VerificationStatus } from '../types/marketplace';
 import { api, setAuthToken } from './api';
 import {
   CAMPUS_AFFILIATION_OPTIONS,
+  FirebaseEnvStatus,
+  inspectFirebaseEnv,
   mapGoogleAuthError,
+  normalizeFirebaseEnvValues,
 } from './marketplaceLogic';
 
+const firebaseEnvValues = normalizeFirebaseEnvValues({
+  VITE_FIREBASE_API_KEY: import.meta.env.VITE_FIREBASE_API_KEY,
+  VITE_FIREBASE_AUTH_DOMAIN: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  VITE_FIREBASE_PROJECT_ID: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  VITE_FIREBASE_STORAGE_BUCKET: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  VITE_FIREBASE_MESSAGING_SENDER_ID: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  VITE_FIREBASE_APP_ID: import.meta.env.VITE_FIREBASE_APP_ID,
+});
+
 const firebaseConfig = {
-  apiKey: (import.meta.env.VITE_FIREBASE_API_KEY || '').trim(),
-  authDomain: (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '').trim(),
-  projectId: (import.meta.env.VITE_FIREBASE_PROJECT_ID || '').trim(),
-  appId: (import.meta.env.VITE_FIREBASE_APP_ID || '').trim(),
-  ...(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET
-    ? { storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET).trim() }
+  apiKey: firebaseEnvValues.VITE_FIREBASE_API_KEY,
+  authDomain: firebaseEnvValues.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: firebaseEnvValues.VITE_FIREBASE_PROJECT_ID,
+  appId: firebaseEnvValues.VITE_FIREBASE_APP_ID,
+  ...(firebaseEnvValues.VITE_FIREBASE_STORAGE_BUCKET
+    ? { storageBucket: firebaseEnvValues.VITE_FIREBASE_STORAGE_BUCKET }
     : {}),
-  ...(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID
-    ? { messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID).trim() }
+  ...(firebaseEnvValues.VITE_FIREBASE_MESSAGING_SENDER_ID
+    ? { messagingSenderId: firebaseEnvValues.VITE_FIREBASE_MESSAGING_SENDER_ID }
     : {}),
 };
 
 const FIREBASE_PROFILE_PREFIX = 'hostelloop_fb_profile_';
 
+export function getFirebaseEnvStatus(): FirebaseEnvStatus {
+  return inspectFirebaseEnv(firebaseEnvValues);
+}
+
 export function isFirebaseConfigured(): boolean {
-  return Boolean(
-    firebaseConfig.apiKey &&
-      firebaseConfig.authDomain &&
-      firebaseConfig.projectId &&
-      firebaseConfig.appId
-  );
+  return getFirebaseEnvStatus().configured;
 }
 
 let cachedApp: FirebaseApp | null = null;
 let cachedAuth: Auth | null = null;
+let lastFirebaseInitError: string | null = null;
 
 function getFirebaseAuthInstance(): Auth | null {
   if (!isFirebaseConfigured()) {
     return null;
   }
-  if (!cachedApp) {
-    cachedApp = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseConfig);
+  try {
+    if (!cachedApp) {
+      cachedApp = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseConfig);
+    }
+    if (!cachedAuth) {
+      cachedAuth = getAuth(cachedApp);
+      setPersistence(cachedAuth, browserLocalPersistence).catch(() => {
+        // Ignore persistence fallback issues in restricted browsers
+      });
+    }
+    lastFirebaseInitError = null;
+    return cachedAuth;
+  } catch (err: unknown) {
+    const fbErr = err as { code?: string; message?: string };
+    lastFirebaseInitError = mapGoogleAuthError(fbErr?.code || fbErr?.message || '');
+    return null;
   }
-  if (!cachedAuth) {
-    cachedAuth = getAuth(cachedApp);
-    setPersistence(cachedAuth, browserLocalPersistence).catch(() => {
-      // Ignore persistence fallback issues in restricted browsers
-    });
-  }
-  return cachedAuth;
+}
+
+export function getFirebaseInitError(): string | null {
+  return lastFirebaseInitError;
 }
 
 export async function awaitFirebaseAuthReady(): Promise<FirebaseUser | null> {
   const auth = getFirebaseAuthInstance();
   if (!auth) return null;
-  if (typeof auth.authStateReady === 'function') {
-    await auth.authStateReady();
+  try {
+    if (typeof auth.authStateReady === 'function') {
+      await auth.authStateReady();
+    }
+    return auth.currentUser;
+  } catch {
+    return null;
   }
-  return auth.currentUser;
 }
 
 export function getCurrentFirebaseUser(): FirebaseUser | null {
@@ -154,6 +181,10 @@ export async function syncFirebaseUserSession(
   const idToken = await fbUser.getIdToken();
   try {
     const res = await api.googleFirebaseAuth(idToken);
+    if (!res?.user || !res?.token) {
+      // Static SPA rewrite fallback (e.g., 200 HTML returned for /api/*)
+      return buildUserProfileFromFirebaseUser(fbUser);
+    }
     setAuthToken(res.token);
     saveStoredFirebaseProfile(res.user);
     return {
@@ -162,8 +193,8 @@ export async function syncFirebaseUserSession(
     };
   } catch (err: unknown) {
     const apiErr = err as { status?: number };
-    // Static SPA deployments (e.g., Vercel without Express server.ts) return 404 on /api/*
-    if (apiErr?.status === 404) {
+    // Static SPA deployments (e.g., Vercel without Express server.ts) or missing server-side env
+    if (apiErr?.status === 404 || apiErr?.status === 405 || apiErr?.status === 503) {
       return buildUserProfileFromFirebaseUser(fbUser);
     }
     throw err;
@@ -171,14 +202,18 @@ export async function syncFirebaseUserSession(
 }
 
 export async function signInWithGoogleFirebase(): Promise<GoogleSignInResult> {
-  const auth = getFirebaseAuthInstance();
-  if (!auth) {
-    throw new Error(
-      'Firebase Google Sign-In is not configured yet. Add VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID, and VITE_FIREBASE_APP_ID.'
-    );
-  }
-
   try {
+    const auth = getFirebaseAuthInstance();
+    if (!auth) {
+      if (lastFirebaseInitError) {
+        throw new Error(lastFirebaseInitError);
+      }
+      const envStatus = getFirebaseEnvStatus();
+      throw new Error(
+        `Firebase Google Sign-In is not configured yet. Missing: ${envStatus.missingRequired.join(', ')}.`
+      );
+    }
+
     await setPersistence(auth, browserLocalPersistence).catch(() => {
       // Continue with default persistence if restricted
     });
@@ -189,87 +224,15 @@ export async function signInWithGoogleFirebase(): Promise<GoogleSignInResult> {
     provider.setCustomParameters({ prompt: 'select_account' });
 
     const credential = await signInWithPopup(auth, provider);
+    if (!credential.user?.email) {
+      throw new Error('Google account did not return an email address.');
+    }
     return await syncFirebaseUserSession(credential.user);
   } catch (err: unknown) {
     const fbErr = err as { code?: string; message?: string };
     const message = mapGoogleAuthError(fbErr?.code || fbErr?.message || '');
     throw new Error(message);
   }
-}
-
-export async function signInWithGoogleOAuthPopup(): Promise<GoogleSignInResult> {
-  const { url } = await api.getGoogleOAuthUrl();
-
-  return new Promise<GoogleSignInResult>((resolve, reject) => {
-    const width = 520;
-    const height = 640;
-    const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
-    const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
-
-    const popup = window.open(
-      url,
-      'hostelloop_google_oauth',
-      `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,status=no`
-    );
-
-    if (!popup) {
-      reject(
-        new Error(
-          'Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.'
-        )
-      );
-      return;
-    }
-
-    let settled = false;
-
-    const cleanup = () => {
-      window.removeEventListener('message', onMessage);
-      window.clearInterval(closedCheckTimer);
-    };
-
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      const payload = event.data as
-        | {
-            type?: string;
-            token?: string;
-            user?: UserProfile;
-            isNewUser?: boolean;
-            error?: string;
-          }
-        | undefined;
-      if (!payload || !payload.type) return;
-
-      if (payload.type === 'GOOGLE_OAUTH_SUCCESS' && payload.token && payload.user) {
-        settled = true;
-        cleanup();
-        setAuthToken(payload.token);
-        resolve({
-          user: payload.user,
-          isNewUser: Boolean(payload.isNewUser),
-        });
-      } else if (payload.type === 'GOOGLE_OAUTH_ERROR') {
-        settled = true;
-        cleanup();
-        reject(new Error(payload.error || 'Google authentication failed.'));
-      }
-    };
-
-    window.addEventListener('message', onMessage);
-
-    const closedCheckTimer = window.setInterval(() => {
-      if (popup.closed && !settled) {
-        settled = true;
-        cleanup();
-        reject(
-          new Error(
-            'Google sign-in popup was closed before completing sign-in. Click "Continue with Google" to try again.'
-          )
-        );
-      }
-    }, 400);
-  });
 }
 
 export function subscribeFirebaseAuth(

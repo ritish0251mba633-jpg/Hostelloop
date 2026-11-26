@@ -48,8 +48,6 @@ export default function App() {
   const [wishlistIds, setWishlistIds] = useState<string[]>([]);
   const [inquiries, setInquiries] = useState<InquiryRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [firebaseConfigured, setFirebaseConfigured] = useState(false);
-  const [googleOAuthConfigured, setGoogleOAuthConfigured] = useState(false);
   const [loadingInitial, setLoadingInitial] = useState(true);
 
   // Explore filter state
@@ -62,20 +60,15 @@ export default function App() {
 
   const refreshData = useCallback(async () => {
     try {
-      const [fbUser, listingsRes, wishlistRes, meRes, cfgRes] = await Promise.all([
+      const [fbUser, listingsRes, wishlistRes, meRes] = await Promise.all([
         awaitFirebaseAuthReady().catch(() => null),
         api.getListings().catch(() => null),
         api.getWishlist().catch(() => null),
         api.getMe().catch(() => null),
-        api.getConfig().catch(() => null),
       ]);
 
-      if (listingsRes) setListings(listingsRes.listings);
-      if (wishlistRes) setWishlistIds(wishlistRes.wishlistIds);
-      if (cfgRes) {
-        setFirebaseConfigured(cfgRes.firebaseConfigured);
-        setGoogleOAuthConfigured(cfgRes.googleOAuthConfigured);
-      }
+      if (Array.isArray(listingsRes?.listings)) setListings(listingsRes.listings);
+      if (Array.isArray(wishlistRes?.wishlistIds)) setWishlistIds(wishlistRes.wishlistIds);
 
       let resolvedUser = meRes?.user || null;
       if (!resolvedUser && fbUser) {
@@ -92,7 +85,7 @@ export default function App() {
       if (resolvedUser) {
         try {
           const inqRes = await api.getInquiries();
-          setInquiries(inqRes.inquiries);
+          setInquiries(Array.isArray(inqRes?.inquiries) ? inqRes.inquiries : []);
         } catch {
           setInquiries([]);
         }
@@ -114,10 +107,6 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = subscribeFirebaseAuth(async (fbUser) => {
       if (fbUser) {
-        setCurrentUser((prev) => {
-          if (prev?.googleUid === fbUser.uid) return prev;
-          return prev;
-        });
         try {
           const synced = await syncFirebaseUserSession(fbUser);
           setCurrentUser((prev) => {
@@ -129,6 +118,10 @@ export default function App() {
         } catch {
           // Ignore silent restore errors; user can click Continue with Google
         }
+      } else {
+        setCurrentUser((prev) =>
+          prev?.authProvider === 'google_firebase' ? null : prev
+        );
       }
     });
     return () => unsubscribe();
@@ -306,8 +299,6 @@ export default function App() {
 
             {activeRoute === 'signin' && (
               <SignInPage
-                firebaseConfigured={firebaseConfigured}
-                googleOAuthConfigured={googleOAuthConfigured}
                 redirectNotice={authRedirectNotice}
                 onBack={() => {
                   setPendingRoute(null);

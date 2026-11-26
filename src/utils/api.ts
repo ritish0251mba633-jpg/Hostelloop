@@ -78,8 +78,6 @@ export const api = {
     apiFetch<{
       allowedDomains: string[];
       firebaseConfigured: boolean;
-      firebaseProjectIdSet: boolean;
-      googleOAuthConfigured: boolean;
       emailDeliveryConfigured: boolean;
       demoModeAvailable: boolean;
     }>('/api/config'),
@@ -94,8 +92,6 @@ export const api = {
         body: JSON.stringify({ idToken }),
       }
     ),
-
-  getGoogleOAuthUrl: () => apiFetch<{ url: string }>('/api/auth/google/url'),
 
   completeProfile: (payload: {
     name: string;

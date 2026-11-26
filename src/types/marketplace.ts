@@ -40,7 +40,7 @@ export enum VerificationStatus {
   DemoUnverified = 'demo_unverified',
 }
 
-export type AuthProviderType = 'google_firebase' | 'google_oauth' | 'email' | 'demo';
+export type AuthProviderType = 'google_firebase' | 'email' | 'demo';
 
 export type SortOption =
   | 'relevant'
