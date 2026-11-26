@@ -63,8 +63,10 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`) as Error & {
+      status?: number;
       fieldErrors?: Record<string, string>;
     };
+    err.status = res.status;
     err.fieldErrors = data.errors;
     throw err;
   }

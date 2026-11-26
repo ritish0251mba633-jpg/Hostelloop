@@ -10,10 +10,12 @@ import {
   InquiryRecord,
 } from './types/marketplace';
 import { SEED_LISTINGS } from './data/seedData';
-import { api, getAuthToken, setAuthToken } from './utils/api';
+import { api, setAuthToken } from './utils/api';
 import {
+  awaitFirebaseAuthReady,
   signOutFirebaseIfActive,
   subscribeFirebaseAuth,
+  syncFirebaseUserSession,
 } from './utils/googleAuth';
 import { Navbar } from './components/Navbar';
 import { LandingPage } from './components/LandingPage';
@@ -60,21 +62,40 @@ export default function App() {
 
   const refreshData = useCallback(async () => {
     try {
-      const [listingsRes, wishlistRes, meRes, cfgRes] = await Promise.all([
-        api.getListings(),
-        api.getWishlist(),
-        api.getMe(),
-        api.getConfig(),
+      const [fbUser, listingsRes, wishlistRes, meRes, cfgRes] = await Promise.all([
+        awaitFirebaseAuthReady().catch(() => null),
+        api.getListings().catch(() => null),
+        api.getWishlist().catch(() => null),
+        api.getMe().catch(() => null),
+        api.getConfig().catch(() => null),
       ]);
-      setListings(listingsRes.listings);
-      setWishlistIds(wishlistRes.wishlistIds);
-      setCurrentUser(meRes.user);
-      setFirebaseConfigured(cfgRes.firebaseConfigured);
-      setGoogleOAuthConfigured(cfgRes.googleOAuthConfigured);
 
-      if (meRes.user) {
-        const inqRes = await api.getInquiries();
-        setInquiries(inqRes.inquiries);
+      if (listingsRes) setListings(listingsRes.listings);
+      if (wishlistRes) setWishlistIds(wishlistRes.wishlistIds);
+      if (cfgRes) {
+        setFirebaseConfigured(cfgRes.firebaseConfigured);
+        setGoogleOAuthConfigured(cfgRes.googleOAuthConfigured);
+      }
+
+      let resolvedUser = meRes?.user || null;
+      if (!resolvedUser && fbUser) {
+        try {
+          const synced = await syncFirebaseUserSession(fbUser);
+          resolvedUser = synced.user;
+        } catch {
+          resolvedUser = null;
+        }
+      }
+
+      setCurrentUser(resolvedUser);
+
+      if (resolvedUser) {
+        try {
+          const inqRes = await api.getInquiries();
+          setInquiries(inqRes.inquiries);
+        } catch {
+          setInquiries([]);
+        }
       } else {
         setInquiries([]);
       }
@@ -89,23 +110,29 @@ export default function App() {
     refreshData();
   }, [refreshData]);
 
-  // Restore backend session if Firebase persisted a signed-in Google user across refreshes
+  // Keep React state synced with Firebase persisted auth state across refreshes
   useEffect(() => {
     const unsubscribe = subscribeFirebaseAuth(async (fbUser) => {
-      if (fbUser && !getAuthToken()) {
+      if (fbUser) {
+        setCurrentUser((prev) => {
+          if (prev?.googleUid === fbUser.uid) return prev;
+          return prev;
+        });
         try {
-          const idToken = await fbUser.getIdToken();
-          const res = await api.googleFirebaseAuth(idToken);
-          setAuthToken(res.token);
-          setCurrentUser(res.user);
-          await refreshData();
+          const synced = await syncFirebaseUserSession(fbUser);
+          setCurrentUser((prev) => {
+            if (prev?.googleUid === synced.user.googleUid && prev?.id === synced.user.id) {
+              return prev;
+            }
+            return synced.user;
+          });
         } catch {
           // Ignore silent restore errors; user can click Continue with Google
         }
       }
     });
     return () => unsubscribe();
-  }, [refreshData]);
+  }, []);
 
   const openSignIn = (notice?: string) => {
     setAuthRedirectNotice(notice || null);

@@ -15,6 +15,7 @@ import {
   VerificationStatus,
 } from '../types/marketplace';
 import { api } from '../utils/api';
+import { saveStoredFirebaseProfile } from '../utils/googleAuth';
 import {
   CAMPUS_AFFILIATION_OPTIONS,
   getUserIdentityBadge,
@@ -108,11 +109,32 @@ export function ProfilePage({
         whatsappOptIn,
         bio,
       });
+      saveStoredFirebaseProfile(user);
       onProfileUpdated(user);
       setEditing(false);
       setSaveMessage('Profile updated successfully.');
-    } catch (err) {
-      setSaveMessage(err instanceof Error ? err.message : 'Unable to save profile.');
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number };
+      if (apiErr?.status === 404 && currentUser.authProvider === 'google_firebase') {
+        const updated: UserProfile = {
+          ...currentUser,
+          name: name.trim() || currentUser.name,
+          campusAffiliation,
+          hostelBlock,
+          roomNumber,
+          programAndYear,
+          phone,
+          whatsappOptIn,
+          bio,
+          profileCompleted: true,
+        };
+        saveStoredFirebaseProfile(updated);
+        onProfileUpdated(updated);
+        setEditing(false);
+        setSaveMessage('Profile updated locally.');
+      } else {
+        setSaveMessage(err instanceof Error ? err.message : 'Unable to save profile.');
+      }
     } finally {
       setSaving(false);
     }

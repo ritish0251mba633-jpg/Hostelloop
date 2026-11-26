@@ -10,16 +10,27 @@ import {
   Auth,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { UserProfile } from '../types/marketplace';
+import { UserProfile, VerificationStatus } from '../types/marketplace';
 import { api, setAuthToken } from './api';
-import { mapGoogleAuthError } from './marketplaceLogic';
+import {
+  CAMPUS_AFFILIATION_OPTIONS,
+  mapGoogleAuthError,
+} from './marketplaceLogic';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  apiKey: (import.meta.env.VITE_FIREBASE_API_KEY || '').trim(),
+  authDomain: (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '').trim(),
+  projectId: (import.meta.env.VITE_FIREBASE_PROJECT_ID || '').trim(),
+  appId: (import.meta.env.VITE_FIREBASE_APP_ID || '').trim(),
+  ...(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET
+    ? { storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET).trim() }
+    : {}),
+  ...(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID
+    ? { messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID).trim() }
+    : {}),
 };
+
+const FIREBASE_PROFILE_PREFIX = 'hostelloop_fb_profile_';
 
 export function isFirebaseConfigured(): boolean {
   return Boolean(
@@ -49,9 +60,114 @@ function getFirebaseAuthInstance(): Auth | null {
   return cachedAuth;
 }
 
+export async function awaitFirebaseAuthReady(): Promise<FirebaseUser | null> {
+  const auth = getFirebaseAuthInstance();
+  if (!auth) return null;
+  if (typeof auth.authStateReady === 'function') {
+    await auth.authStateReady();
+  }
+  return auth.currentUser;
+}
+
+export function getCurrentFirebaseUser(): FirebaseUser | null {
+  const auth = getFirebaseAuthInstance();
+  return auth ? auth.currentUser : null;
+}
+
+export function getStoredFirebaseProfile(uid: string): Partial<UserProfile> | null {
+  try {
+    const raw = localStorage.getItem(`${FIREBASE_PROFILE_PREFIX}${uid}`);
+    return raw ? (JSON.parse(raw) as Partial<UserProfile>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredFirebaseProfile(profile: UserProfile): void {
+  if (!profile.googleUid) return;
+  try {
+    localStorage.setItem(
+      `${FIREBASE_PROFILE_PREFIX}${profile.googleUid}`,
+      JSON.stringify(profile)
+    );
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function buildUserProfileFromFirebaseUser(
+  fbUser: Pick<FirebaseUser, 'uid' | 'email' | 'displayName' | 'photoURL' | 'metadata'>
+): { user: UserProfile; isNewUser: boolean } {
+  const stored = getStoredFirebaseProfile(fbUser.uid);
+  const email = (fbUser.email || stored?.email || '').trim().toLowerCase();
+  const displayName = (
+    stored?.name ||
+    fbUser.displayName ||
+    email.split('@')[0] ||
+    'Student'
+  ).trim();
+  const joinedAt =
+    stored?.joinedAt ||
+    (fbUser.metadata?.creationTime
+      ? new Date(fbUser.metadata.creationTime).toISOString()
+      : new Date().toISOString());
+
+  const user: UserProfile = {
+    id: stored?.id || `fb-${fbUser.uid.slice(0, 12)}`,
+    googleUid: fbUser.uid,
+    authProvider: 'google_firebase',
+    name: displayName,
+    email,
+    campusEmail: stored?.campusEmail,
+    campusAffiliation: stored?.campusAffiliation || CAMPUS_AFFILIATION_OPTIONS[0],
+    role: 'student',
+    verificationStatus: stored?.verificationStatus || VerificationStatus.Pending,
+    isDemoAccount: false,
+    profileCompleted: Boolean(stored?.profileCompleted),
+    hostelBlock: stored?.hostelBlock || 'Boys Hostel Block A',
+    roomNumber: stored?.roomNumber || '',
+    programAndYear: stored?.programAndYear || '',
+    phone: stored?.phone || '',
+    whatsappOptIn: Boolean(stored?.whatsappOptIn),
+    avatarUrl: fbUser.photoURL || stored?.avatarUrl,
+    bio: stored?.bio || 'HostelLoop student member.',
+    joinedAt,
+    accountStatus: 'active',
+    verifiedAt: stored?.verifiedAt,
+  };
+
+  saveStoredFirebaseProfile(user);
+  return {
+    user,
+    isNewUser: !user.profileCompleted,
+  };
+}
+
 export interface GoogleSignInResult {
   user: UserProfile;
   isNewUser: boolean;
+}
+
+export async function syncFirebaseUserSession(
+  fbUser: FirebaseUser
+): Promise<GoogleSignInResult> {
+  const idToken = await fbUser.getIdToken();
+  try {
+    const res = await api.googleFirebaseAuth(idToken);
+    setAuthToken(res.token);
+    saveStoredFirebaseProfile(res.user);
+    return {
+      user: res.user,
+      isNewUser: res.isNewUser,
+    };
+  } catch (err: unknown) {
+    const apiErr = err as { status?: number };
+    // Static SPA deployments (e.g., Vercel without Express server.ts) return 404 on /api/*
+    if (apiErr?.status === 404) {
+      return buildUserProfileFromFirebaseUser(fbUser);
+    }
+    throw err;
+  }
 }
 
 export async function signInWithGoogleFirebase(): Promise<GoogleSignInResult> {
@@ -63,19 +179,17 @@ export async function signInWithGoogleFirebase(): Promise<GoogleSignInResult> {
   }
 
   try {
+    await setPersistence(auth, browserLocalPersistence).catch(() => {
+      // Continue with default persistence if restricted
+    });
+
     const provider = new GoogleAuthProvider();
     provider.addScope('email');
     provider.addScope('profile');
     provider.setCustomParameters({ prompt: 'select_account' });
 
     const credential = await signInWithPopup(auth, provider);
-    const idToken = await credential.user.getIdToken();
-    const res = await api.googleFirebaseAuth(idToken);
-    setAuthToken(res.token);
-    return {
-      user: res.user,
-      isNewUser: res.isNewUser,
-    };
+    return await syncFirebaseUserSession(credential.user);
   } catch (err: unknown) {
     const fbErr = err as { code?: string; message?: string };
     const message = mapGoogleAuthError(fbErr?.code || fbErr?.message || '');

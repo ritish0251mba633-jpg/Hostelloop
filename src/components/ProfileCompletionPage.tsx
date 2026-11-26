@@ -2,6 +2,7 @@ import { useState, FormEvent } from 'react';
 import { CheckCircle2, ShieldAlert, ArrowRight } from 'lucide-react';
 import { UserProfile } from '../types/marketplace';
 import { api } from '../utils/api';
+import { saveStoredFirebaseProfile } from '../utils/googleAuth';
 import { CAMPUS_AFFILIATION_OPTIONS } from '../utils/marketplaceLogic';
 
 interface ProfileCompletionPageProps {
@@ -33,6 +34,21 @@ export function ProfileCompletionPage({
     .slice(0, 2)
     .toUpperCase();
 
+  const buildCompletedLocalUser = (): UserProfile => {
+    const updated: UserProfile = {
+      ...currentUser,
+      name: name.trim() || currentUser.name,
+      campusAffiliation,
+      hostelBlock,
+      roomNumber: roomNumber.trim(),
+      programAndYear: programAndYear.trim(),
+      bio: bio.trim() || currentUser.bio,
+      profileCompleted: true,
+    };
+    saveStoredFirebaseProfile(updated);
+    return updated;
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -46,9 +62,15 @@ export function ProfileCompletionPage({
         programAndYear,
         bio,
       });
+      saveStoredFirebaseProfile(user);
       await onCompleted(user);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save profile details.');
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number; message?: string };
+      if (apiErr?.status === 404 && currentUser.authProvider === 'google_firebase') {
+        await onCompleted(buildCompletedLocalUser());
+      } else {
+        setError(err instanceof Error ? err.message : 'Unable to save profile details.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -65,9 +87,10 @@ export function ProfileCompletionPage({
         programAndYear,
         bio,
       });
+      saveStoredFirebaseProfile(user);
       await onCompleted(user);
     } catch {
-      await onCompleted({ ...currentUser, profileCompleted: true });
+      await onCompleted(buildCompletedLocalUser());
     } finally {
       setSubmitting(false);
     }
