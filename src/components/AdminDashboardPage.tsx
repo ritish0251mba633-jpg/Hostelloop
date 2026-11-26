@@ -13,13 +13,16 @@ import {
   TransactionFeedback,
   UnitEconomicsScenario,
   UserProfile,
-  VerificationStatus,
 } from '../types/marketplace';
 import {
   ILLUSTRATIVE_PILOT_METRICS,
   VENTURE_SCENARIOS,
 } from '../data/seedData';
-import { calculateUnitEconomics, formatINR } from '../utils/marketplaceLogic';
+import {
+  calculateUnitEconomics,
+  formatINR,
+  getUserIdentityBadge,
+} from '../utils/marketplaceLogic';
 import { api } from '../utils/api';
 
 interface AdminDashboardPageProps {
@@ -338,7 +341,7 @@ export function AdminDashboardPage({
               <thead className="bg-[#F8FAF8] border-b border-[#E2EAE5] text-xs text-[#526058]">
                 <tr>
                   <th className="py-3 px-4 font-medium">Student</th>
-                  <th className="py-3 px-4 font-medium">DGU Email</th>
+                  <th className="py-3 px-4 font-medium">Email & Auth</th>
                   <th className="py-3 px-4 font-medium">Verification</th>
                   <th className="py-3 px-4 font-medium">Role</th>
                   <th className="py-3 px-4 font-medium">Status</th>
@@ -354,13 +357,16 @@ export function AdminDashboardPage({
                         {u.hostelBlock}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-xs text-[#526058]">{u.email}</td>
+                    <td className="py-3 px-4 text-xs text-[#526058]">
+                      {u.email}
+                      {u.campusEmail && u.campusEmail !== u.email && (
+                        <span className="block text-[11px] text-[#145C45]">
+                          Campus: {u.campusEmail}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-xs">
-                      {u.verificationStatus === VerificationStatus.Verified
-                        ? 'Verified DGU Email'
-                        : u.isDemoAccount
-                          ? 'Demo Account'
-                          : 'Pending Verification'}
+                      {getUserIdentityBadge(u).label}
                     </td>
                     <td className="py-3 px-4 text-xs capitalize">{u.role}</td>
                     <td className="py-3 px-4 text-xs capitalize">{u.accountStatus}</td>

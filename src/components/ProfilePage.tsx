@@ -15,6 +15,10 @@ import {
   VerificationStatus,
 } from '../types/marketplace';
 import { api } from '../utils/api';
+import {
+  CAMPUS_AFFILIATION_OPTIONS,
+  getUserIdentityBadge,
+} from '../utils/marketplaceLogic';
 
 interface ProfilePageProps {
   currentUser: UserProfile | null;
@@ -37,6 +41,9 @@ export function ProfilePage({
 }: ProfilePageProps) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(currentUser?.name || '');
+  const [campusAffiliation, setCampusAffiliation] = useState(
+    currentUser?.campusAffiliation || CAMPUS_AFFILIATION_OPTIONS[0]
+  );
   const [hostelBlock, setHostelBlock] = useState(currentUser?.hostelBlock || 'Boys Hostel Block A');
   const [roomNumber, setRoomNumber] = useState(currentUser?.roomNumber || '');
   const [programAndYear, setProgramAndYear] = useState(currentUser?.programAndYear || '');
@@ -46,6 +53,7 @@ export function ProfilePage({
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
+  const [campusEmailInput, setCampusEmailInput] = useState(currentUser?.campusEmail || '');
   const [verificationCodeInput, setVerificationCodeInput] = useState('');
   const [simulatedInboxCode, setSimulatedInboxCode] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -60,14 +68,14 @@ export function ProfilePage({
             Student Profile & Account
           </h1>
           <p className="text-sm text-[#526058]">
-            Sign in with your DGU student email (@dgu.ac.in) or explore using our clearly labelled Demo Mode.
+            Sign in with Google or create an account to view and edit your HostelLoop profile.
           </p>
           <button
             type="button"
             onClick={onOpenAuth}
             className="px-6 py-3 bg-[#145C45] hover:bg-[#0F4634] text-white text-sm font-medium rounded-lg"
           >
-            Sign In / Create DGU Account
+            Continue to Sign In
           </button>
         </div>
       </div>
@@ -83,6 +91,8 @@ export function ProfilePage({
     (i) => i.buyerId === currentUser.id || i.sellerId === currentUser.id
   ).length;
 
+  const identityBadge = getUserIdentityBadge(currentUser);
+
   const handleSaveProfile = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -90,6 +100,7 @@ export function ProfilePage({
     try {
       const { user } = await api.updateProfile({
         name,
+        campusAffiliation,
         hostelBlock,
         roomNumber,
         programAndYear,
@@ -109,9 +120,11 @@ export function ProfilePage({
 
   const handleRequestCode = async () => {
     setVerifyError(null);
+    const targetEmail = campusEmailInput.trim() || currentUser.campusEmail || currentUser.email;
     try {
-      const res = await api.resendVerificationCode();
+      const res = await api.sendCampusVerificationCode(targetEmail);
       setSimulatedInboxCode(res.demoVerificationCode);
+      setCampusEmailInput(res.campusEmail);
     } catch (err) {
       setVerifyError(err instanceof Error ? err.message : 'Could not generate code.');
     }
@@ -122,7 +135,7 @@ export function ProfilePage({
     setVerifying(true);
     setVerifyError(null);
     try {
-      const { user } = await api.verifyEmail(verificationCodeInput);
+      const { user } = await api.verifyCampusEmail(verificationCodeInput);
       onProfileUpdated(user);
       setVerificationCodeInput('');
       setSimulatedInboxCode(null);
@@ -149,7 +162,8 @@ export function ProfilePage({
             <img
               src={currentUser.avatarUrl}
               alt={currentUser.name}
-              className="w-16 h-16 rounded-full object-cover border border-[#D4E3DA]"
+              referrerPolicy="no-referrer"
+              className="w-16 h-16 rounded-full object-cover border border-[#D4E3DA] shrink-0"
             />
           ) : (
             <div className="w-16 h-16 rounded-full bg-[#145C45] text-white flex items-center justify-center text-xl font-bold shrink-0">
@@ -160,24 +174,35 @@ export function ProfilePage({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-bold text-[#202824]">{currentUser.name}</h1>
-              {currentUser.verificationStatus === VerificationStatus.Verified ? (
+              {identityBadge.isVerifiedDguStudent ? (
                 <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#145C45] bg-[#DDF4E7] px-2.5 py-0.5 rounded-md">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Verified DGU Student
+                  {identityBadge.label}
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-md">
                   <ShieldAlert className="w-3.5 h-3.5" />
-                  {currentUser.isDemoAccount
-                    ? 'Demo Mode Account (Unverified)'
-                    : 'Pending DGU Email Verification'}
+                  {identityBadge.label}
                 </span>
               )}
             </div>
             <p className="text-sm text-[#526058] mt-1">
-              {currentUser.email} · {currentUser.programAndYear} · {currentUser.hostelBlock}
-              {currentUser.roomNumber ? ` (${currentUser.roomNumber})` : ''}
+              {currentUser.email} · {currentUser.campusAffiliation}
             </p>
+            <p className="text-xs text-[#526058] mt-0.5">
+              {currentUser.programAndYear || 'Student'} · {currentUser.hostelBlock}
+              {currentUser.roomNumber ? ` (${currentUser.roomNumber})` : ''}
+              {' · '}Member since{' '}
+              {new Date(currentUser.joinedAt).toLocaleDateString('en-IN', {
+                month: 'short',
+                year: 'numeric',
+              })}
+            </p>
+            {currentUser.googleUid && (
+              <p className="text-[11px] text-[#73827A] font-mono-tabular mt-1">
+                Google UID: {currentUser.googleUid}
+              </p>
+            )}
             <p className="text-sm text-[#202824] mt-2 max-w-2xl">{currentUser.bio}</p>
           </div>
         </div>
@@ -186,6 +211,7 @@ export function ProfilePage({
           type="button"
           onClick={() => {
             setName(currentUser.name);
+            setCampusAffiliation(currentUser.campusAffiliation || CAMPUS_AFFILIATION_OPTIONS[0]);
             setHostelBlock(currentUser.hostelBlock);
             setRoomNumber(currentUser.roomNumber);
             setProgramAndYear(currentUser.programAndYear);
@@ -200,24 +226,36 @@ export function ProfilePage({
         </button>
       </div>
 
-      {/* Truthful Verification Banner if Pending */}
-      {currentUser.verificationStatus === VerificationStatus.Pending &&
+      {/* Optional Separate DGU Student Verification Card */}
+      {currentUser.verificationStatus !== VerificationStatus.Verified &&
         !currentUser.isDemoAccount && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 space-y-4">
+          <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-6 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-[#202824] flex items-center gap-2">
                   <Mail className="w-4 h-4 text-amber-700" />
-                  <span>Complete Your DGU Email Verification</span>
+                  <span>Optional: Verify a DGU Campus Email (@dgu.ac.in)</span>
                 </h2>
                 <p className="text-xs text-[#526058] mt-1">
-                  Your account is restricted until you confirm ownership of {currentUser.email}. HostelLoop never marks unverified students as verified.
+                  You can use HostelLoop with any Google account ({currentUser.email}). If you
+                  also hold a <code className="text-[#145C45]">@dgu.ac.in</code> student address,
+                  verify it below to display the Verified DGU Student badge.
                 </p>
               </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5 max-w-xl">
+              <input
+                type="email"
+                value={campusEmailInput}
+                onChange={(e) => setCampusEmailInput(e.target.value)}
+                placeholder="yourname@dgu.ac.in"
+                className="flex-1 px-3.5 py-2 bg-white border border-amber-300 rounded-lg text-sm"
+              />
               <button
                 type="button"
                 onClick={handleRequestCode}
-                className="px-4 py-2 bg-white border border-amber-300 text-xs font-medium text-[#202824] rounded-lg whitespace-nowrap self-start"
+                className="px-4 py-2 bg-white border border-amber-300 text-xs font-medium text-[#202824] rounded-lg whitespace-nowrap hover:bg-amber-50"
               >
                 Send Verification Code
               </button>
@@ -246,7 +284,7 @@ export function ProfilePage({
                 disabled={verifying}
                 className="px-4 py-2 bg-[#145C45] text-white text-sm font-medium rounded-lg"
               >
-                {verifying ? 'Verifying...' : 'Verify Email'}
+                {verifying ? 'Verifying...' : 'Verify DGU Email'}
               </button>
             </form>
             {verifyError && <p className="text-xs text-rose-700">{verifyError}</p>}
@@ -281,6 +319,22 @@ export function ProfilePage({
                 className="w-full px-3.5 py-2 bg-[#F8FAF8] border border-[#D4E3DA] rounded-lg text-sm"
                 required
               />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-[#526058] mb-1">
+                Campus Affiliation
+              </label>
+              <select
+                value={campusAffiliation}
+                onChange={(e) => setCampusAffiliation(e.target.value)}
+                className="w-full px-3.5 py-2 bg-[#F8FAF8] border border-[#D4E3DA] rounded-lg text-sm"
+              >
+                {CAMPUS_AFFILIATION_OPTIONS.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="block text-xs font-medium text-[#526058] mb-1">
@@ -331,7 +385,7 @@ export function ProfilePage({
                 className="w-full px-3.5 py-2 bg-[#F8FAF8] border border-[#D4E3DA] rounded-lg text-sm font-mono-tabular"
               />
             </div>
-            <div className="flex items-center pt-5">
+            <div className="sm:col-span-2 flex items-center pt-1">
               <label className="inline-flex items-center gap-2 text-sm text-[#202824] cursor-pointer">
                 <input
                   type="checkbox"

@@ -22,7 +22,9 @@ import {
   VerificationStatus,
 } from './src/types/marketplace.ts';
 import {
+  CAMPUS_AFFILIATION_OPTIONS,
   DEFAULT_ALLOWED_DGU_DOMAINS,
+  validateAnyEmail,
   validateDguEmail,
   validateListingInput,
 } from './src/utils/marketplaceLogic.ts';
@@ -95,6 +97,15 @@ function createInitialDb(): DatabaseSchema {
   };
 }
 
+function normalizeStoredUser(u: Partial<StoredUser>): StoredUser {
+  return {
+    ...(u as StoredUser),
+    authProvider: u.authProvider || (u.isDemoAccount ? 'demo' : 'email'),
+    campusAffiliation: u.campusAffiliation || CAMPUS_AFFILIATION_OPTIONS[0],
+    profileCompleted: u.profileCompleted !== undefined ? u.profileCompleted : true,
+  };
+}
+
 function loadDb(): DatabaseSchema {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -107,8 +118,9 @@ function loadDb(): DatabaseSchema {
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<DatabaseSchema>;
+    const rawUsers = parsed.users && parsed.users.length > 0 ? parsed.users : SEED_USERS;
     return {
-      users: parsed.users && parsed.users.length > 0 ? parsed.users : SEED_USERS.map((u) => ({ ...u })),
+      users: rawUsers.map((u) => normalizeStoredUser(u)),
       listings: parsed.listings && parsed.listings.length > 0 ? parsed.listings : SEED_LISTINGS.map((l) => ({ ...l })),
       inquiries: parsed.inquiries || SEED_INQUIRIES.map((i) => ({ ...i })),
       reports: parsed.reports || SEED_REPORTS.map((r) => ({ ...r })),
@@ -121,6 +133,184 @@ function loadDb(): DatabaseSchema {
     fs.writeFileSync(DB_FILE, JSON.stringify(fallback, null, 2), 'utf-8');
     return fallback;
   }
+}
+
+const FIREBASE_CERTS_URL =
+  'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+let cachedFirebaseCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
+
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (cachedFirebaseCerts && cachedFirebaseCerts.expiresAt > now) {
+    return cachedFirebaseCerts.certs;
+  }
+  const resp = await fetch(FIREBASE_CERTS_URL);
+  if (!resp.ok) {
+    throw new Error('Unable to fetch Google public certificates for Firebase ID token verification.');
+  }
+  const certs = (await resp.json()) as Record<string, string>;
+  const cacheControl = resp.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/);
+  const maxAgeSec = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
+  cachedFirebaseCerts = {
+    certs,
+    expiresAt: now + maxAgeSec * 1000,
+  };
+  return certs;
+}
+
+function decodeBase64UrlJson<T>(segment: string): T {
+  const json = Buffer.from(segment, 'base64url').toString('utf-8');
+  return JSON.parse(json) as T;
+}
+
+interface VerifiedGoogleIdentity {
+  googleUid: string;
+  email: string;
+  name: string;
+  avatarUrl?: string;
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedGoogleIdentity> {
+  const projectId = (
+    process.env.FIREBASE_PROJECT_ID ||
+    process.env.VITE_FIREBASE_PROJECT_ID ||
+    ''
+  ).trim();
+  if (!projectId) {
+    throw new Error(
+      'Server FIREBASE_PROJECT_ID (or VITE_FIREBASE_PROJECT_ID) is not configured for Firebase token verification.'
+    );
+  }
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Invalid Firebase ID token format.');
+  }
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = decodeBase64UrlJson<{ alg?: string; kid?: string }>(headerB64);
+  const payload = decodeBase64UrlJson<{
+    aud?: string;
+    iss?: string;
+    sub?: string;
+    exp?: number;
+    iat?: number;
+    email?: string;
+    name?: string;
+    picture?: string;
+  }>(payloadB64);
+
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('Unsupported Firebase token signing algorithm.');
+  }
+
+  const certs = await getFirebasePublicCerts();
+  const certPem = certs[header.kid];
+  if (!certPem) {
+    throw new Error('Unknown Firebase signing key ID.');
+  }
+
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${headerB64}.${payloadB64}`);
+  verifier.end();
+  const signatureBuf = Buffer.from(signatureB64, 'base64url');
+  const publicKey = new crypto.X509Certificate(certPem).publicKey;
+  if (!verifier.verify(publicKey, signatureBuf)) {
+    throw new Error('Firebase ID token signature verification failed.');
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.aud !== projectId) {
+    throw new Error('Firebase ID token audience does not match this project.');
+  }
+  if (payload.iss !== `https://securetoken.google.com/${projectId}`) {
+    throw new Error('Firebase ID token issuer mismatch.');
+  }
+  if (!payload.exp || payload.exp <= nowSec) {
+    throw new Error('Firebase ID token has expired.');
+  }
+  if (!payload.iat || payload.iat > nowSec + 300) {
+    throw new Error('Firebase ID token issued-at timestamp is invalid.');
+  }
+  if (!payload.sub || !payload.email) {
+    throw new Error('Firebase ID token is missing required user identity fields.');
+  }
+
+  return {
+    googleUid: payload.sub,
+    email: payload.email.trim().toLowerCase(),
+    name: (payload.name || payload.email.split('@')[0] || 'Student').trim(),
+    avatarUrl: payload.picture,
+  };
+}
+
+const oauthStates = new Map<string, { createdAt: number; redirectUri: string }>();
+
+function getBaseUrl(req: Request): string {
+  if (process.env.APP_URL) {
+    return process.env.APP_URL.replace(/\/+$/, '');
+  }
+  const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0] || req.protocol || 'http';
+  const host = (req.headers['x-forwarded-host'] as string)?.split(',')[0] || req.get('host');
+  return `${proto}://${host}`;
+}
+
+function upsertGoogleUser(
+  identity: VerifiedGoogleIdentity,
+  provider: 'google_firebase' | 'google_oauth'
+): { user: StoredUser; isNewUser: boolean } {
+  const normalizedEmail = identity.email.trim().toLowerCase();
+  let existing = db.users.find(
+    (u) => !u.isDemoAccount && u.googleUid && u.googleUid === identity.googleUid
+  );
+  if (!existing) {
+    existing = db.users.find(
+      (u) => !u.isDemoAccount && u.email.toLowerCase() === normalizedEmail
+    );
+  }
+
+  if (existing) {
+    if (existing.accountStatus === 'suspended') {
+      throw new Error('This account has been suspended by campus moderation.');
+    }
+    existing.googleUid = identity.googleUid;
+    existing.authProvider = provider;
+    if (identity.avatarUrl) {
+      existing.avatarUrl = identity.avatarUrl;
+    }
+    if (!existing.name && identity.name) {
+      existing.name = identity.name;
+    }
+    return {
+      user: existing,
+      isNewUser: !existing.profileCompleted,
+    };
+  }
+
+  const newUser: StoredUser = {
+    id: `user-${crypto.randomUUID().slice(0, 8)}`,
+    googleUid: identity.googleUid,
+    authProvider: provider,
+    name: identity.name,
+    email: normalizedEmail,
+    campusAffiliation: CAMPUS_AFFILIATION_OPTIONS[0],
+    role: 'student',
+    verificationStatus: VerificationStatus.Pending,
+    isDemoAccount: false,
+    profileCompleted: false,
+    hostelBlock: 'Boys Hostel Block A',
+    roomNumber: '',
+    programAndYear: '',
+    phone: '',
+    whatsappOptIn: false,
+    avatarUrl: identity.avatarUrl,
+    bio: 'HostelLoop student member.',
+    joinedAt: new Date().toISOString(),
+    accountStatus: 'active',
+  };
+
+  db.users.push(newUser);
+  db.wishlists[newUser.id] = db.wishlists[newUser.id] || [];
+  return { user: newUser, isNewUser: true };
 }
 
 function saveDb(db: DatabaseSchema): void {
@@ -161,8 +351,22 @@ async function startServer() {
   });
 
   app.get('/api/config', (_req, res) => {
+    const firebaseConfigured = Boolean(
+      process.env.VITE_FIREBASE_API_KEY &&
+        process.env.VITE_FIREBASE_AUTH_DOMAIN &&
+        process.env.VITE_FIREBASE_PROJECT_ID &&
+        process.env.VITE_FIREBASE_APP_ID
+    );
+    const googleOAuthConfigured = Boolean(
+      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+    );
     res.json({
       allowedDomains: ALLOWED_DGU_DOMAINS,
+      firebaseConfigured,
+      firebaseProjectIdSet: Boolean(
+        process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID
+      ),
+      googleOAuthConfigured,
       emailDeliveryConfigured: Boolean(process.env.SMTP_HOST),
       demoModeAvailable: true,
     });
@@ -176,12 +380,222 @@ async function startServer() {
     return res.json({ user: sanitizeUser(req.currentUser) });
   });
 
-  // Auth: Sign Up with DGU domain validation and real pending verification code
+  // Auth: Verify Firebase Google ID Token and create/link account
+  app.post('/api/auth/google-firebase', async (req, res) => {
+    const idToken = String(req.body?.idToken || '').trim();
+    if (!idToken) {
+      return res.status(400).json({ error: 'Firebase idToken is required.' });
+    }
+    try {
+      const identity = await verifyFirebaseIdToken(idToken);
+      const { user, isNewUser } = upsertGoogleUser(identity, 'google_firebase');
+      const token = crypto.randomBytes(24).toString('hex');
+      db.sessions[token] = user.id;
+      saveDb(db);
+      return res.json({
+        token,
+        user: sanitizeUser(user),
+        isNewUser,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Google authentication failed.';
+      const status = msg.includes('not configured') ? 503 : 401;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  // Auth: Direct Google OAuth 2.0 popup URL (when GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET are set)
+  app.get('/api/auth/google/url', (req, res) => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return res.status(503).json({
+        error:
+          'Google OAuth credentials are not configured. Set VITE_FIREBASE_* or GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.',
+      });
+    }
+    const baseUrl = getBaseUrl(req);
+    const redirectUri = `${baseUrl}/auth/callback`;
+    const state = crypto.randomBytes(20).toString('hex');
+    oauthStates.set(state, { createdAt: Date.now(), redirectUri });
+    // Prune stale states older than 15 minutes
+    for (const [key, val] of oauthStates.entries()) {
+      if (Date.now() - val.createdAt > 15 * 60 * 1000) {
+        oauthStates.delete(key);
+      }
+    }
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'openid email profile',
+      prompt: 'select_account',
+      access_type: 'online',
+      state,
+    });
+    return res.json({
+      url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+    });
+  });
+
+  // Auth: Direct Google OAuth 2.0 popup callback
+  app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
+    const sendPopupResult = (payload: Record<string, unknown>) => {
+      const safeJson = JSON.stringify(payload).replace(/</g, '\\u003c');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(`<!doctype html>
+<html>
+  <head><title>HostelLoop Google Sign-In</title></head>
+  <body style="font-family:sans-serif;padding:24px;color:#202824;background:#F8FAF8;">
+    <p>Completing HostelLoop Google Sign-In...</p>
+    <script>
+      (function() {
+        var data = ${safeJson};
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(data, window.location.origin);
+        }
+        window.close();
+      })();
+    </script>
+  </body>
+</html>`);
+    };
+
+    const { code, state, error } = req.query as Record<string, string | undefined>;
+    if (error) {
+      return sendPopupResult({
+        type: 'GOOGLE_OAUTH_ERROR',
+        error: `Google sign-in was cancelled or denied (${error}).`,
+      });
+    }
+    if (!code || !state || !oauthStates.has(state)) {
+      return sendPopupResult({
+        type: 'GOOGLE_OAUTH_ERROR',
+        error: 'Invalid or expired OAuth state. Please try signing in again.',
+      });
+    }
+
+    const storedState = oauthStates.get(state)!;
+    oauthStates.delete(state);
+
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return sendPopupResult({
+        type: 'GOOGLE_OAUTH_ERROR',
+        error: 'Google OAuth credentials are missing on the server.',
+      });
+    }
+
+    try {
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: storedState.redirectUri,
+          grant_type: 'authorization_code',
+        }),
+      });
+      const tokenData = (await tokenResp.json()) as {
+        access_token?: string;
+        error?: string;
+        error_description?: string;
+      };
+      if (!tokenResp.ok || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed.');
+      }
+
+      const userinfoResp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+      const profile = (await userinfoResp.json()) as {
+        sub?: string;
+        email?: string;
+        name?: string;
+        picture?: string;
+      };
+      if (!userinfoResp.ok || !profile.sub || !profile.email) {
+        throw new Error('Could not retrieve Google user profile.');
+      }
+
+      const { user, isNewUser } = upsertGoogleUser(
+        {
+          googleUid: profile.sub,
+          email: profile.email,
+          name: profile.name || profile.email.split('@')[0],
+          avatarUrl: profile.picture,
+        },
+        'google_oauth'
+      );
+      const sessionToken = crypto.randomBytes(24).toString('hex');
+      db.sessions[sessionToken] = user.id;
+      saveDb(db);
+
+      return sendPopupResult({
+        type: 'GOOGLE_OAUTH_SUCCESS',
+        token: sessionToken,
+        user: sanitizeUser(user),
+        isNewUser,
+      });
+    } catch (err) {
+      return sendPopupResult({
+        type: 'GOOGLE_OAUTH_ERROR',
+        error: err instanceof Error ? err.message : 'Google OAuth sign-in failed.',
+      });
+    }
+  });
+
+  // Auth: Complete profile onboarding after first Google Sign-In
+  app.post('/api/auth/complete-profile', (req: AuthedRequest, res) => {
+    if (!req.currentUser) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const { name, campusAffiliation, hostelBlock, roomNumber, programAndYear, bio } = req.body || {};
+    if (name && String(name).trim().length >= 2) {
+      req.currentUser.name = String(name).trim();
+    }
+    if (campusAffiliation && String(campusAffiliation).trim()) {
+      req.currentUser.campusAffiliation = String(campusAffiliation).trim();
+    }
+    if (hostelBlock && String(hostelBlock).trim()) {
+      req.currentUser.hostelBlock = String(hostelBlock).trim();
+    }
+    if (roomNumber !== undefined) {
+      req.currentUser.roomNumber = String(roomNumber).trim();
+    }
+    if (programAndYear !== undefined) {
+      req.currentUser.programAndYear = String(programAndYear).trim();
+    }
+    if (bio && String(bio).trim()) {
+      req.currentUser.bio = String(bio).trim();
+    }
+    req.currentUser.profileCompleted = true;
+
+    db.listings = db.listings.map((item) =>
+      item.sellerId === req.currentUser!.id
+        ? {
+            ...item,
+            sellerName: req.currentUser!.name,
+            sellerHostelBlock: req.currentUser!.hostelBlock,
+          }
+        : item
+    );
+
+    saveDb(db);
+    return res.json({ user: sanitizeUser(req.currentUser) });
+  });
+
+  // Auth: Sign Up with any valid email (campus email optional for DGU badge)
   app.post('/api/auth/signup', (req, res) => {
     const {
       name,
       email,
       password,
+      campusAffiliation = CAMPUS_AFFILIATION_OPTIONS[0],
       hostelBlock = 'Boys Hostel Block A',
       roomNumber = '',
       programAndYear = 'Student',
@@ -190,7 +604,7 @@ async function startServer() {
     if (!name || String(name).trim().length < 2) {
       return res.status(400).json({ error: 'Please enter your full name.' });
     }
-    const emailCheck = validateDguEmail(String(email || ''), ALLOWED_DGU_DOMAINS);
+    const emailCheck = validateAnyEmail(String(email || ''));
     if (!emailCheck.valid) {
       return res.status(400).json({ error: emailCheck.error });
     }
@@ -200,23 +614,27 @@ async function startServer() {
 
     const normalizedEmail = String(email).trim().toLowerCase();
     if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-      return res.status(409).json({ error: 'An account with this DGU email already exists. Please sign in.' });
+      return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
     }
 
-    const code = generateSixDigitCode();
+    const code = emailCheck.isAllowedCampusDomain ? generateSixDigitCode() : undefined;
     const newUser: StoredUser = {
       id: `user-${crypto.randomUUID().slice(0, 8)}`,
+      authProvider: 'email',
       name: String(name).trim(),
       email: normalizedEmail,
+      campusEmail: emailCheck.isAllowedCampusDomain ? normalizedEmail : undefined,
+      campusAffiliation: String(campusAffiliation).trim() || CAMPUS_AFFILIATION_OPTIONS[0],
       role: 'student',
       verificationStatus: VerificationStatus.Pending,
       isDemoAccount: false,
+      profileCompleted: true,
       hostelBlock: String(hostelBlock).trim(),
       roomNumber: String(roomNumber).trim(),
       programAndYear: String(programAndYear).trim(),
       phone: '',
       whatsappOptIn: false,
-      bio: 'DGU campus member on HostelLoop.',
+      bio: 'HostelLoop campus member.',
       joinedAt: new Date().toISOString(),
       accountStatus: 'active',
       passwordHash: hashPassword(String(password)),
@@ -233,9 +651,10 @@ async function startServer() {
       token,
       user: sanitizeUser(newUser),
       verificationPending: true,
-      simulatedCampusEmailNotice:
-        'SMTP email delivery is not configured in this local environment. Use the simulated campus inbox verification code below to complete DGU email verification.',
-      demoVerificationCode: code,
+      simulatedCampusEmailNotice: emailCheck.isAllowedCampusDomain
+        ? 'SMTP email delivery is not configured in this local environment. Use the simulated campus inbox code below to verify your DGU email.'
+        : 'Account created! Verify an @dgu.ac.in campus email anytime in Profile Settings if you want the Verified DGU Student badge.',
+      demoVerificationCode: code || '',
     });
   });
 
@@ -246,11 +665,16 @@ async function startServer() {
     const user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail);
     if (!user || user.isDemoAccount) {
       return res.status(401).json({
-        error: 'Invalid email or password. Use the Demo Mode switcher for pre-seeded demo accounts.',
+        error: 'Invalid email or password. Use Continue with Google or Demo Mode.',
       });
     }
     if (user.accountStatus === 'suspended') {
       return res.status(403).json({ error: 'This account has been suspended by campus moderation.' });
+    }
+    if (!user.passwordHash && user.googleUid) {
+      return res.status(401).json({
+        error: 'This account uses Google Sign-In. Please click "Continue with Google".',
+      });
     }
     if (!verifyPassword(String(password || ''), user.passwordHash)) {
       return res.status(401).json({ error: 'Invalid email or password.' });
@@ -283,20 +707,61 @@ async function startServer() {
     });
   });
 
-  // Auth: Verify DGU email with 6-digit code
-  app.post('/api/auth/verify-email', (req: AuthedRequest, res) => {
+  // Auth: Send optional separate DGU campus email verification code for Google/any-email users
+  app.post('/api/auth/send-campus-code', (req: AuthedRequest, res) => {
     if (!req.currentUser) {
       return res.status(401).json({ error: 'Sign in required.' });
     }
     if (req.currentUser.isDemoAccount) {
       return res.status(400).json({
-        error: 'Demo accounts cannot be marked as verified DGU students. Sign up with a @dgu.ac.in email.',
+        error: 'Demo accounts cannot be verified as DGU students. Sign in with Google or an email account.',
+      });
+    }
+    const rawCampusEmail = String(
+      req.body?.campusEmail || req.currentUser.campusEmail || req.currentUser.email || ''
+    )
+      .trim()
+      .toLowerCase();
+    const check = validateDguEmail(rawCampusEmail, ALLOWED_DGU_DOMAINS);
+    if (!check.valid) {
+      return res.status(400).json({ error: check.error });
+    }
+
+    const code = generateSixDigitCode();
+    req.currentUser.campusEmail = rawCampusEmail;
+    req.currentUser.verificationCode = code;
+    saveDb(db);
+
+    return res.json({
+      campusEmail: rawCampusEmail,
+      demoVerificationCode: code,
+      message:
+        'SMTP campus email delivery is not configured in this local environment. Use the simulated campus inbox code below to complete DGU verification.',
+    });
+  });
+
+  // Auth: Verify DGU campus email with 6-digit code
+  app.post(['/api/auth/verify-email', '/api/auth/verify-campus-email'], (req: AuthedRequest, res) => {
+    if (!req.currentUser) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    if (req.currentUser.isDemoAccount) {
+      return res.status(400).json({
+        error: 'Demo accounts cannot be marked as verified DGU students.',
+      });
+    }
+    const targetCampusEmail = req.currentUser.campusEmail || req.currentUser.email;
+    const domainCheck = validateDguEmail(targetCampusEmail, ALLOWED_DGU_DOMAINS);
+    if (!domainCheck.valid) {
+      return res.status(400).json({
+        error: 'Please enter and request a code for an @dgu.ac.in campus email first.',
       });
     }
     const { code } = req.body || {};
-    if (!code || String(code).trim() !== req.currentUser.verificationCode) {
+    if (!code || !req.currentUser.verificationCode || String(code).trim() !== req.currentUser.verificationCode) {
       return res.status(400).json({ error: 'Verification code does not match. Please check and try again.' });
     }
+    req.currentUser.campusEmail = targetCampusEmail;
     req.currentUser.verificationStatus = VerificationStatus.Verified;
     req.currentUser.verifiedAt = new Date().toISOString();
     req.currentUser.verificationCode = undefined;
@@ -315,9 +780,17 @@ async function startServer() {
   // Auth: Resend DGU verification code
   app.post('/api/auth/resend-code', (req: AuthedRequest, res) => {
     if (!req.currentUser || req.currentUser.isDemoAccount) {
-      return res.status(400).json({ error: 'Verification codes only apply to registered @dgu.ac.in accounts.' });
+      return res.status(400).json({ error: 'Verification codes only apply to registered student accounts.' });
+    }
+    const targetCampusEmail = req.currentUser.campusEmail || req.currentUser.email;
+    const domainCheck = validateDguEmail(targetCampusEmail, ALLOWED_DGU_DOMAINS);
+    if (!domainCheck.valid) {
+      return res.status(400).json({
+        error: domainCheck.error,
+      });
     }
     const code = generateSixDigitCode();
+    req.currentUser.campusEmail = targetCampusEmail;
     req.currentUser.verificationCode = code;
     saveDb(db);
     return res.json({
@@ -331,13 +804,13 @@ async function startServer() {
     const normalizedEmail = String(req.body?.email || '').trim().toLowerCase();
     const user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail && !u.isDemoAccount);
     if (!user) {
-      return res.status(404).json({ error: 'No registered DGU account found with that email.' });
+      return res.status(404).json({ error: 'No registered account found with that email.' });
     }
     const resetCode = generateSixDigitCode();
     user.resetCode = resetCode;
     saveDb(db);
     return res.json({
-      message: 'Password reset code generated (simulated campus inbox delivery).',
+      message: 'Password reset code generated (simulated inbox delivery).',
       demoResetCode: resetCode,
     });
   });
@@ -371,11 +844,23 @@ async function startServer() {
     if (!req.currentUser) {
       return res.status(401).json({ error: 'Sign in required to update your profile.' });
     }
-    const { name, hostelBlock, roomNumber, programAndYear, phone, whatsappOptIn, bio, avatarUrl } =
-      req.body || {};
+    const {
+      name,
+      campusAffiliation,
+      hostelBlock,
+      roomNumber,
+      programAndYear,
+      phone,
+      whatsappOptIn,
+      bio,
+      avatarUrl,
+    } = req.body || {};
 
     if (name && String(name).trim().length >= 2) {
       req.currentUser.name = String(name).trim();
+    }
+    if (campusAffiliation !== undefined && String(campusAffiliation).trim()) {
+      req.currentUser.campusAffiliation = String(campusAffiliation).trim();
     }
     if (hostelBlock !== undefined) req.currentUser.hostelBlock = String(hostelBlock).trim();
     if (roomNumber !== undefined) req.currentUser.roomNumber = String(roomNumber).trim();
@@ -384,6 +869,7 @@ async function startServer() {
     if (whatsappOptIn !== undefined) req.currentUser.whatsappOptIn = Boolean(whatsappOptIn);
     if (bio !== undefined) req.currentUser.bio = String(bio).trim();
     if (avatarUrl !== undefined) req.currentUser.avatarUrl = String(avatarUrl);
+    req.currentUser.profileCompleted = true;
 
     // Sync seller info onto user's listings
     db.listings = db.listings.map((item) =>

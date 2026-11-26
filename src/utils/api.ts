@@ -75,16 +75,44 @@ export const api = {
   getConfig: () =>
     apiFetch<{
       allowedDomains: string[];
+      firebaseConfigured: boolean;
+      firebaseProjectIdSet: boolean;
+      googleOAuthConfigured: boolean;
       emailDeliveryConfigured: boolean;
       demoModeAvailable: boolean;
     }>('/api/config'),
 
   getMe: () => apiFetch<{ user: UserProfile | null }>('/api/auth/me'),
 
+  googleFirebaseAuth: (idToken: string) =>
+    apiFetch<{ token: string; user: UserProfile; isNewUser: boolean }>(
+      '/api/auth/google-firebase',
+      {
+        method: 'POST',
+        body: JSON.stringify({ idToken }),
+      }
+    ),
+
+  getGoogleOAuthUrl: () => apiFetch<{ url: string }>('/api/auth/google/url'),
+
+  completeProfile: (payload: {
+    name: string;
+    campusAffiliation: string;
+    hostelBlock: string;
+    roomNumber?: string;
+    programAndYear: string;
+    bio?: string;
+  }) =>
+    apiFetch<{ user: UserProfile }>('/api/auth/complete-profile', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   signup: (payload: {
     name: string;
     email: string;
     password: string;
+    campusAffiliation?: string;
     hostelBlock: string;
     roomNumber?: string;
     programAndYear?: string;
@@ -103,13 +131,28 @@ export const api = {
   login: (payload: { email: string; password: string }) =>
     apiFetch<{ token: string; user: UserProfile }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ email: payload.email, password: payload.password }),
     }),
 
   enterDemoSession: (accountType: 'student' | 'admin') =>
     apiFetch<{ token: string; user: UserProfile }>('/api/auth/demo-session', {
       method: 'POST',
       body: JSON.stringify({ accountType }),
+    }),
+
+  sendCampusVerificationCode: (campusEmail: string) =>
+    apiFetch<{ campusEmail: string; demoVerificationCode: string; message: string }>(
+      '/api/auth/send-campus-code',
+      {
+        method: 'POST',
+        body: JSON.stringify({ campusEmail }),
+      }
+    ),
+
+  verifyCampusEmail: (code: string) =>
+    apiFetch<{ user: UserProfile }>('/api/auth/verify-campus-email', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
     }),
 
   verifyEmail: (code: string) =>

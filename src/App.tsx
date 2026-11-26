@@ -10,7 +10,11 @@ import {
   InquiryRecord,
 } from './types/marketplace';
 import { SEED_LISTINGS } from './data/seedData';
-import { api, setAuthToken } from './utils/api';
+import { api, getAuthToken, setAuthToken } from './utils/api';
+import {
+  signOutFirebaseIfActive,
+  subscribeFirebaseAuth,
+} from './utils/googleAuth';
 import { Navbar } from './components/Navbar';
 import { LandingPage } from './components/LandingPage';
 import { ExploreMarketplace } from './components/ExploreMarketplace';
@@ -20,19 +24,31 @@ import { ActivityHubPage } from './components/ActivityHubPage';
 import { ProfilePage } from './components/ProfilePage';
 import { TrustSafetyPage } from './components/TrustSafetyPage';
 import { AdminDashboardPage } from './components/AdminDashboardPage';
-import { AuthModal } from './components/AuthModal';
+import { SignInPage } from './components/SignInPage';
+import { ProfileCompletionPage } from './components/ProfileCompletionPage';
+
+const PROTECTED_ROUTES: AppRoute[] = ['sell', 'my-listings', 'messages', 'profile'];
+
+const ROUTE_LABELS: Partial<Record<AppRoute, string>> = {
+  sell: 'list an item for sale',
+  'my-listings': 'manage your listings',
+  messages: 'view your campus inquiries',
+  profile: 'view and edit your student profile',
+};
 
 export default function App() {
   const [activeRoute, setActiveRoute] = useState<AppRoute>('home');
+  const [pendingRoute, setPendingRoute] = useState<AppRoute | null>(null);
+  const [authRedirectNotice, setAuthRedirectNotice] = useState<string | null>(null);
   const [selectedListing, setSelectedListing] = useState<ProductListing | null>(null);
 
   const [listings, setListings] = useState<ProductListing[]>(SEED_LISTINGS);
   const [wishlistIds, setWishlistIds] = useState<string[]>([]);
   const [inquiries, setInquiries] = useState<InquiryRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [allowedDomains, setAllowedDomains] = useState<string[]>(['dgu.ac.in']);
+  const [firebaseConfigured, setFirebaseConfigured] = useState(false);
+  const [googleOAuthConfigured, setGoogleOAuthConfigured] = useState(false);
   const [loadingInitial, setLoadingInitial] = useState(true);
-  const [authModalOpen, setAuthModalOpen] = useState(false);
 
   // Explore filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -53,7 +69,8 @@ export default function App() {
       setListings(listingsRes.listings);
       setWishlistIds(wishlistRes.wishlistIds);
       setCurrentUser(meRes.user);
-      setAllowedDomains(cfgRes.allowedDomains);
+      setFirebaseConfigured(cfgRes.firebaseConfigured);
+      setGoogleOAuthConfigured(cfgRes.googleOAuthConfigured);
 
       if (meRes.user) {
         const inqRes = await api.getInquiries();
@@ -72,7 +89,41 @@ export default function App() {
     refreshData();
   }, [refreshData]);
 
+  // Restore backend session if Firebase persisted a signed-in Google user across refreshes
+  useEffect(() => {
+    const unsubscribe = subscribeFirebaseAuth(async (fbUser) => {
+      if (fbUser && !getAuthToken()) {
+        try {
+          const idToken = await fbUser.getIdToken();
+          const res = await api.googleFirebaseAuth(idToken);
+          setAuthToken(res.token);
+          setCurrentUser(res.user);
+          await refreshData();
+        } catch {
+          // Ignore silent restore errors; user can click Continue with Google
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [refreshData]);
+
+  const openSignIn = (notice?: string) => {
+    setAuthRedirectNotice(notice || null);
+    setActiveRoute('signin');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const navigateTo = (route: AppRoute) => {
+    if (PROTECTED_ROUTES.includes(route) && !currentUser) {
+      setPendingRoute(route);
+      const actionLabel = ROUTE_LABELS[route] || 'access this page';
+      openSignIn(`Sign in to ${actionLabel}.`);
+      return;
+    }
+
+    if (route !== 'signin') {
+      setAuthRedirectNotice(null);
+    }
     setActiveRoute(route);
     if (route !== 'product') {
       setSelectedListing(null);
@@ -87,7 +138,6 @@ export default function App() {
   };
 
   const handleToggleWishlist = async (listingId: string) => {
-    // Optimistic update
     setWishlistIds((prev) =>
       prev.includes(listingId)
         ? prev.filter((id) => id !== listingId)
@@ -97,7 +147,6 @@ export default function App() {
       const res = await api.toggleWishlist(listingId);
       setWishlistIds(res.wishlistIds);
     } catch {
-      // revert on error
       refreshData();
     }
   };
@@ -123,12 +172,39 @@ export default function App() {
     setOnlyAvailable(false);
   };
 
-  const handleAuthenticated = async (user: UserProfile) => {
+  const handleAuthenticated = async (user: UserProfile, isNewUser?: boolean) => {
+    setCurrentUser(user);
+    setAuthRedirectNotice(null);
+    await refreshData();
+
+    if (isNewUser || !user.profileCompleted) {
+      setActiveRoute('complete-profile');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    const destination = pendingRoute || 'home';
+    setPendingRoute(null);
+    setActiveRoute(destination);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleProfileCompleted = async (user: UserProfile) => {
+    setCurrentUser(user);
+    await refreshData();
+    const destination = pendingRoute || 'home';
+    setPendingRoute(null);
+    setActiveRoute(destination);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleProfileUpdated = async (user: UserProfile) => {
     setCurrentUser(user);
     await refreshData();
   };
 
   const handleLogout = async () => {
+    await signOutFirebaseIfActive();
     try {
       await api.logout();
     } catch {
@@ -136,17 +212,22 @@ export default function App() {
     }
     setAuthToken(null);
     setCurrentUser(null);
+    setPendingRoute(null);
+    setAuthRedirectNotice(null);
     setInquiries([]);
+    if (PROTECTED_ROUTES.includes(activeRoute) || activeRoute === 'complete-profile') {
+      setActiveRoute('home');
+    }
     await refreshData();
   };
 
   const handleEnterDemoAdmin = async () => {
     const { token, user } = await api.enterDemoSession('admin');
     setAuthToken(token);
-    await handleAuthenticated(user);
+    setCurrentUser(user);
+    await refreshData();
   };
 
-  // Sync selectedListing if listings updated
   const activeProduct = selectedListing
     ? listings.find((l) => l.id === selectedListing.id) || selectedListing
     : null;
@@ -158,14 +239,14 @@ export default function App() {
         onNavigate={navigateTo}
         currentUser={currentUser}
         wishlistCount={wishlistIds.length}
-        onOpenAuth={() => setAuthModalOpen(true)}
+        onOpenAuth={() => openSignIn()}
         onLogout={handleLogout}
       />
 
       {/* Explicit Demo Mode Banner when signed into a Demo Account */}
       {currentUser?.isDemoAccount && (
         <div className="bg-[#DDF4E7] border-b border-[#C3E5D2] px-4 py-1.5 text-center text-xs text-[#145C45]">
-          <strong>Demo Mode:</strong> Signed in as {currentUser.name} · Local sample data (separate from verified @dgu.ac.in accounts).
+          <strong>Demo Mode:</strong> Signed in as {currentUser.name} · Local sample data (separate from Google and verified @dgu.ac.in accounts).
         </div>
       )}
 
@@ -193,6 +274,28 @@ export default function App() {
                 onSearchSubmit={handleSearchFromHero}
                 onCategorySelect={handleCategorySelect}
                 onNavigate={navigateTo}
+              />
+            )}
+
+            {activeRoute === 'signin' && (
+              <SignInPage
+                firebaseConfigured={firebaseConfigured}
+                googleOAuthConfigured={googleOAuthConfigured}
+                redirectNotice={authRedirectNotice}
+                onBack={() => {
+                  setPendingRoute(null);
+                  setAuthRedirectNotice(null);
+                  navigateTo('home');
+                }}
+                onAuthenticated={handleAuthenticated}
+                onNavigate={navigateTo}
+              />
+            )}
+
+            {activeRoute === 'complete-profile' && currentUser && (
+              <ProfileCompletionPage
+                currentUser={currentUser}
+                onCompleted={handleProfileCompleted}
               />
             )}
 
@@ -228,7 +331,7 @@ export default function App() {
                 onBack={() => navigateTo('explore')}
                 onToggleWishlist={handleToggleWishlist}
                 onSelectListing={handleSelectListing}
-                onOpenAuth={() => setAuthModalOpen(true)}
+                onOpenAuth={() => openSignIn('Sign in to contact the seller.')}
                 onInquiryCreated={refreshData}
               />
             )}
@@ -236,7 +339,7 @@ export default function App() {
             {activeRoute === 'sell' && (
               <SellItemPage
                 currentUser={currentUser}
-                onOpenAuth={() => setAuthModalOpen(true)}
+                onOpenAuth={() => openSignIn('Sign in to publish an item on HostelLoop.')}
                 onListingCreated={() => refreshData()}
                 onViewListing={handleSelectListing}
               />
@@ -256,7 +359,7 @@ export default function App() {
                 onSelectListing={handleSelectListing}
                 onListingsChanged={refreshData}
                 onInquiriesChanged={refreshData}
-                onOpenAuth={() => setAuthModalOpen(true)}
+                onOpenAuth={() => openSignIn()}
                 onNavigateSell={() => navigateTo('sell')}
               />
             )}
@@ -267,8 +370,8 @@ export default function App() {
                 listings={listings}
                 wishlistIds={wishlistIds}
                 inquiries={inquiries}
-                onProfileUpdated={handleAuthenticated}
-                onOpenAuth={() => setAuthModalOpen(true)}
+                onProfileUpdated={handleProfileUpdated}
+                onOpenAuth={() => openSignIn()}
                 onNavigate={navigateTo}
               />
             )}
@@ -360,7 +463,7 @@ export default function App() {
                   onClick={() => navigateTo('profile')}
                   className="hover:text-[#145C45]"
                 >
-                  DGU Student Profile
+                  Student Profile
                 </button>
               </li>
               <li>
@@ -380,13 +483,6 @@ export default function App() {
           <span>Sample listings and unit economics projections are labelled for demonstration.</span>
         </div>
       </footer>
-
-      <AuthModal
-        isOpen={authModalOpen}
-        allowedDomains={allowedDomains}
-        onClose={() => setAuthModalOpen(false)}
-        onAuthenticated={handleAuthenticated}
-      />
     </div>
   );
 }

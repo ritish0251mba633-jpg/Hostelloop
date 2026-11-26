@@ -40,6 +40,8 @@ export enum VerificationStatus {
   DemoUnverified = 'demo_unverified',
 }
 
+export type AuthProviderType = 'google_firebase' | 'google_oauth' | 'email' | 'demo';
+
 export type SortOption =
   | 'relevant'
   | 'recent'
@@ -56,15 +58,22 @@ export type AppRoute =
   | 'messages'
   | 'profile'
   | 'safety'
-  | 'admin';
+  | 'admin'
+  | 'signin'
+  | 'complete-profile';
 
 export interface UserProfile {
   id: string;
+  googleUid?: string;
+  authProvider: AuthProviderType;
   name: string;
   email: string;
+  campusEmail?: string;
+  campusAffiliation: string;
   role: 'student' | 'admin';
   verificationStatus: VerificationStatus;
   isDemoAccount: boolean;
+  profileCompleted: boolean;
   hostelBlock: string;
   roomNumber: string;
   programAndYear: string;

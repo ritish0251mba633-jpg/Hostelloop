@@ -5,6 +5,9 @@ import {
   calculateUnitEconomics,
   filterAndSortListings,
   formatINR,
+  getUserIdentityBadge,
+  mapGoogleAuthError,
+  validateAnyEmail,
   validateDguEmail,
   validateListingInput,
   buildWhatsAppLink,
@@ -87,17 +90,52 @@ const SAMPLE_LISTINGS: ProductListing[] = [
   },
 ];
 
-test('validateDguEmail enforces configurable DGU student domain', () => {
-  const valid = validateDguEmail('ritish.0251mba633@dgu.ac.in');
-  assert.equal(valid.valid, true);
-  assert.equal(valid.isAllowedCampusDomain, true);
+test('validateAnyEmail allows gmail.com and any valid Google email while validateDguEmail strictly checks campus verification domain', () => {
+  assert.equal(validateAnyEmail('ritish@gmail.com').valid, true);
+  assert.equal(validateAnyEmail('student@gmail.com').valid, true);
+  assert.equal(validateAnyEmail('user@gmail.com').valid, true);
+  assert.equal(validateAnyEmail('bad-email').valid, false);
 
-  const nonDgu = validateDguEmail('student@gmail.com');
+  const validDgu = validateDguEmail('ritish.0251mba633@dgu.ac.in');
+  assert.equal(validDgu.valid, true);
+  assert.equal(validDgu.isAllowedCampusDomain, true);
+
+  const nonDgu = validateDguEmail('ritish@gmail.com');
   assert.equal(nonDgu.valid, false);
   assert.equal(nonDgu.isAllowedCampusDomain, false);
+});
 
-  const malformed = validateDguEmail('not-an-email');
-  assert.equal(malformed.valid, false);
+test('getUserIdentityBadge clearly distinguishes Google-authenticated users from Verified DGU Students', () => {
+  const googleUnverified = getUserIdentityBadge({
+    authProvider: 'google_firebase',
+    verificationStatus: VerificationStatus.Pending,
+    isDemoAccount: false,
+  });
+  assert.equal(googleUnverified.isVerifiedDguStudent, false);
+  assert.equal(googleUnverified.tone, 'google');
+  assert.match(googleUnverified.label, /Campus Unverified/i);
+
+  const googleAndDguVerified = getUserIdentityBadge({
+    authProvider: 'google_firebase',
+    verificationStatus: VerificationStatus.Verified,
+    isDemoAccount: false,
+  });
+  assert.equal(googleAndDguVerified.isVerifiedDguStudent, true);
+  assert.equal(googleAndDguVerified.label, 'Verified DGU Student');
+
+  const demo = getUserIdentityBadge({
+    authProvider: 'demo',
+    verificationStatus: VerificationStatus.DemoUnverified,
+    isDemoAccount: true,
+  });
+  assert.equal(demo.isVerifiedDguStudent, false);
+  assert.equal(demo.tone, 'demo');
+});
+
+test('mapGoogleAuthError maps Firebase error codes into clear messages', () => {
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-closed-by-user).'), /closed/i);
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-blocked).'), /blocked/i);
+  assert.match(mapGoogleAuthError('Firebase: Error (auth/unauthorized-domain).'), /Authorized domains/i);
 });
 
 test('filterAndSortListings excludes unapproved listings by default and sorts prices accurately', () => {

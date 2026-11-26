@@ -8,9 +8,17 @@ import {
   TransactionType,
   UnitEconomicsScenario,
   CalculatedEconomics,
+  UserProfile,
+  VerificationStatus,
 } from '../types/marketplace';
 
 export const DEFAULT_ALLOWED_DGU_DOMAINS = ['dgu.ac.in'];
+
+export const CAMPUS_AFFILIATION_OPTIONS = [
+  'DBS Global University (Selaqui, Dehradun)',
+  'Other Dehradun University / College',
+  'Incoming Student (Awaiting Campus ID)',
+];
 
 export const CAMPUS_PICKUP_LOCATIONS = [
   'Main Academic Block Courtyard',
@@ -64,6 +72,25 @@ export interface EmailValidationResult {
   error?: string;
 }
 
+export function validateAnyEmail(email: string): EmailValidationResult {
+  const normalized = email.trim().toLowerCase();
+  const basicFormat = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!basicFormat.test(normalized)) {
+    return {
+      valid: false,
+      isAllowedCampusDomain: false,
+      domain: '',
+      error: 'Enter a valid email address.',
+    };
+  }
+  const domain = normalized.split('@')[1] || '';
+  return {
+    valid: true,
+    isAllowedCampusDomain: DEFAULT_ALLOWED_DGU_DOMAINS.includes(domain),
+    domain,
+  };
+}
+
 export function validateDguEmail(
   email: string,
   allowedDomains: string[] = DEFAULT_ALLOWED_DGU_DOMAINS
@@ -87,7 +114,7 @@ export function validateDguEmail(
       valid: false,
       isAllowedCampusDomain: false,
       domain,
-      error: `Campus sign-up is restricted to authorized DGU student emails (@${allowedDomains.join(', @')}). Use Demo Mode to explore without a DGU email.`,
+      error: `DGU student verification requires an authorized campus email (@${allowedDomains.join(', @')}).`,
     };
   }
   return {
@@ -95,6 +122,62 @@ export function validateDguEmail(
     isAllowedCampusDomain: true,
     domain,
   };
+}
+
+export function getUserIdentityBadge(user: Pick<UserProfile, 'verificationStatus' | 'isDemoAccount' | 'authProvider'>): {
+  label: string;
+  isVerifiedDguStudent: boolean;
+  tone: 'verified' | 'google' | 'demo' | 'unverified';
+} {
+  if (user.isDemoAccount) {
+    return {
+      label: 'Demo Mode Account (Unverified)',
+      isVerifiedDguStudent: false,
+      tone: 'demo',
+    };
+  }
+  if (user.verificationStatus === VerificationStatus.Verified) {
+    return {
+      label: 'Verified DGU Student',
+      isVerifiedDguStudent: true,
+      tone: 'verified',
+    };
+  }
+  if (user.authProvider === 'google_firebase' || user.authProvider === 'google_oauth') {
+    return {
+      label: 'Google Signed In · Campus Unverified',
+      isVerifiedDguStudent: false,
+      tone: 'google',
+    };
+  }
+  return {
+    label: 'Unverified Account',
+    isVerifiedDguStudent: false,
+    tone: 'unverified',
+  };
+}
+
+export function mapGoogleAuthError(codeOrMessage: string): string {
+  const lower = (codeOrMessage || '').toLowerCase();
+  if (lower.includes('popup-closed-by-user') || lower.includes('cancelled-popup-request')) {
+    return 'Google sign-in popup was closed before completing sign-in. Click "Continue with Google" to try again.';
+  }
+  if (lower.includes('popup-blocked')) {
+    return 'Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.';
+  }
+  if (lower.includes('account-exists-with-different-credential')) {
+    return 'An account already exists with this email address using another sign-in method.';
+  }
+  if (lower.includes('unauthorized-domain')) {
+    return 'This preview/deployment domain is not yet authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.';
+  }
+  if (lower.includes('network-request-failed')) {
+    return 'Network error while connecting to Google Authentication. Check your connection and retry.';
+  }
+  if (lower.includes('invalid-api-key') || lower.includes('configuration-not-found')) {
+    return 'Firebase Google Authentication is not configured or has an invalid API key.';
+  }
+  return codeOrMessage || 'Google authentication failed. Please try again.';
 }
 
 export interface ListingFilterParams {
@@ -168,7 +251,6 @@ export function filterAndSortListings(
     if (sortBy === 'recent') {
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     }
-    // 'relevant': exact/title match first, then featured experiment, then available, then recent
     const score = (item: ProductListing) => {
       let s = 0;
       if (query && item.title.toLowerCase().includes(query)) s += 100;

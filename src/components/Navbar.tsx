@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Menu, X, ChevronDown, Heart, ShieldCheck, LogOut, LayoutDashboard } from 'lucide-react';
-import { AppRoute, UserProfile, VerificationStatus } from '../types/marketplace';
+import { AppRoute, UserProfile } from '../types/marketplace';
+import { getUserIdentityBadge } from '../utils/marketplaceLogic';
 
 interface NavbarProps {
   activeRoute: AppRoute;
@@ -38,6 +39,16 @@ export function Navbar({
     setMobileMenuOpen(false);
     setAccountMenuOpen(false);
   };
+
+  const identityBadge = currentUser ? getUserIdentityBadge(currentUser) : null;
+  const userInitials = currentUser
+    ? currentUser.name
+        .split(' ')
+        .map((p) => p[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
+    : '';
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-sm border-b border-[#E2EAE5]">
@@ -85,9 +96,21 @@ export function Navbar({
                 onClick={() => setAccountMenuOpen((prev) => !prev)}
                 aria-expanded={accountMenuOpen}
                 aria-label="Open student account menu"
-                className="flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-[#202824] bg-[#F8FAF8] hover:bg-[#DDF4E7]/60 border border-[#E2EAE5] rounded-lg transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#145C45]"
+                className="flex items-center gap-2.5 pl-2 pr-3 py-1.5 text-sm font-medium text-[#202824] bg-[#F8FAF8] hover:bg-[#DDF4E7]/60 border border-[#E2EAE5] rounded-lg transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#145C45]"
               >
-                <span className="max-w-[140px] truncate">{currentUser.name.split(' ')[0]}</span>
+                {currentUser.avatarUrl ? (
+                  <img
+                    src={currentUser.avatarUrl}
+                    alt={currentUser.name}
+                    referrerPolicy="no-referrer"
+                    className="w-7 h-7 rounded-full object-cover border border-[#D4E3DA]"
+                  />
+                ) : (
+                  <span className="w-7 h-7 rounded-full bg-[#145C45] text-white text-xs font-bold flex items-center justify-center">
+                    {userInitials}
+                  </span>
+                )}
+                <span className="max-w-[130px] truncate">{currentUser.name.split(' ')[0]}</span>
                 {wishlistCount > 0 && (
                   <span className="text-xs font-mono-tabular text-[#145C45]">
                     · {wishlistCount} saved
@@ -98,21 +121,33 @@ export function Navbar({
 
               {accountMenuOpen && (
                 <div
-                  className="absolute right-0 mt-2 w-64 bg-white border border-[#E2EAE5] rounded-xl shadow-lg py-2 z-50"
+                  className="absolute right-0 mt-2 w-68 bg-white border border-[#E2EAE5] rounded-xl shadow-lg py-2 z-50"
                   role="menu"
                 >
-                  <div className="px-4 py-2.5 border-b border-[#EEF3EF]">
-                    <p className="text-sm font-semibold text-[#202824] truncate">
-                      {currentUser.name}
-                    </p>
-                    <p className="text-xs text-[#526058] truncate">{currentUser.email}</p>
-                    <p className="text-[11px] font-medium mt-1 text-[#145C45]">
-                      {currentUser.verificationStatus === VerificationStatus.Verified
-                        ? 'Verified DGU Student'
-                        : currentUser.isDemoAccount
-                          ? 'Demo Mode Account'
-                          : 'Pending DGU Verification'}
-                    </p>
+                  <div className="px-4 py-2.5 border-b border-[#EEF3EF] flex items-center gap-3">
+                    {currentUser.avatarUrl ? (
+                      <img
+                        src={currentUser.avatarUrl}
+                        alt={currentUser.name}
+                        referrerPolicy="no-referrer"
+                        className="w-10 h-10 rounded-full object-cover border border-[#D4E3DA] shrink-0"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-[#145C45] text-white text-sm font-bold flex items-center justify-center shrink-0">
+                        {userInitials}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#202824] truncate">
+                        {currentUser.name}
+                      </p>
+                      <p className="text-xs text-[#526058] truncate">{currentUser.email}</p>
+                      {identityBadge && (
+                        <p className="text-[11px] font-medium mt-0.5 text-[#145C45] truncate">
+                          {identityBadge.label}
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   <button
@@ -121,7 +156,7 @@ export function Navbar({
                     onClick={() => handleLinkClick('profile')}
                     className="w-full text-left px-4 py-2 text-sm text-[#202824] hover:bg-[#F8FAF8] transition-colors"
                   >
-                    Student Profile & Settings
+                    My Profile
                   </button>
                   <button
                     type="button"
@@ -167,7 +202,7 @@ export function Navbar({
                     className="w-full text-left px-4 py-2 text-sm text-rose-700 hover:bg-rose-50 flex items-center gap-2 transition-colors"
                   >
                     <LogOut className="w-4 h-4" />
-                    <span>Sign Out</span>
+                    <span>Logout</span>
                   </button>
                 </div>
               )}
