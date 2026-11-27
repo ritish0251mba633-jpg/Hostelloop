@@ -157,7 +157,10 @@ export function getUserIdentityBadge(user: Pick<UserProfile, 'verificationStatus
   };
 }
 
-export function mapGoogleAuthError(codeOrMessage: string): string {
+export function mapGoogleAuthError(
+  codeOrMessage: string,
+  currentHostname: string = typeof window !== 'undefined' ? window.location?.hostname || '' : ''
+): string {
   const lower = (codeOrMessage || '').toLowerCase();
   if (lower.includes('popup-closed-by-user') || lower.includes('cancelled-popup-request')) {
     return 'Google sign-in popup was closed before completing sign-in. Click "Continue with Google" to try again.';
@@ -169,7 +172,8 @@ export function mapGoogleAuthError(codeOrMessage: string): string {
     return 'An account already exists with this email address using another sign-in method.';
   }
   if (lower.includes('unauthorized-domain')) {
-    return 'This preview/deployment domain is not yet authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.';
+    const domainLabel = currentHostname ? `Domain "${currentHostname}"` : 'This preview/deployment domain';
+    return `${domainLabel} is not yet authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.`;
   }
   if (lower.includes('network-request-failed')) {
     return 'Network error while connecting to Google Authentication. Check your connection and retry.';

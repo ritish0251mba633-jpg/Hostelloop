@@ -138,6 +138,10 @@ test('mapGoogleAuthError maps Firebase error codes into clear messages', () => {
   assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-closed-by-user).'), /closed/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/popup-blocked).'), /blocked/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/unauthorized-domain).'), /Authorized domains/i);
+  assert.match(
+    mapGoogleAuthError('Firebase: Error (auth/unauthorized-domain).', 'ais-dev-example.run.app'),
+    /ais-dev-example\.run\.app/
+  );
   assert.match(mapGoogleAuthError('Firebase: Error (auth/operation-not-allowed).'), /Sign-in method/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/user-disabled).'), /disabled/i);
   assert.match(mapGoogleAuthError('Firebase: Error (auth/internal-error).'), /internal error/i);
